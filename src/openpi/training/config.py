@@ -590,7 +590,7 @@ _CONFIGS = [
             assets=AssetsConfig(asset_id="libero"),
             base_config=DataConfig(prompt_from_task=False),
         ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_fast_base/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader("PATH_TO_SFT_CHECKPOINT/params"),
         num_train_steps=10_000,
         batch_size=16,
         freeze_filter=pi0_fast_ricl.Pi0FASTRiclConfig(
@@ -609,6 +609,45 @@ _CONFIGS = [
             warmup_steps=300, peak_lr=2.5e-5, decay_steps=3000, decay_lr=2.5e-6
         ),
     ),
+
+    TrainConfig(
+        name="pi0_fast_libero_ricl_low_mem",
+        finetuning_collected_demos_dir="ricl_libero_preprocessing/collected_demos_training",
+        model=pi0_fast_ricl.Pi0FASTRiclConfig(
+            action_dim=7,
+            action_horizon=10,
+            max_token_len=180,
+            num_retrieved_observations=4,
+            use_action_interpolation=True,
+            lamda=10.0,
+            paligemma_variant="gemma_2b_lora",
+        ),
+        data=RiclLiberoDataConfig(
+            repo_id=None,
+            assets=AssetsConfig(asset_id="libero"),
+            base_config=DataConfig(prompt_from_task=False),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("PATH_TO_LORA_SFT_CHECKPOINT/params"),
+        num_train_steps=10_000,
+        batch_size=16,
+        freeze_filter=pi0_fast_ricl.Pi0FASTRiclConfig(
+            action_dim=7,
+            action_horizon=10,
+            max_token_len=180,
+            num_retrieved_observations=4,
+            use_action_interpolation=True,
+            lamda=10.0,
+            paligemma_variant="gemma_2b_lora",
+        ).get_freeze_filter_with_frozen_img_encoder(),
+        ema_decay=None,
+        log_interval=1,
+        save_interval=300,
+        keep_period=300,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=300, peak_lr=2.5e-5, decay_steps=3000, decay_lr=2.5e-6
+        ),
+    ),
+
 
     #
     # Inference DROID configs.
