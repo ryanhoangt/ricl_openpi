@@ -399,6 +399,60 @@ class RiclDroidDataConfig(DataConfigFactory):
         )
 
 
+
+@dataclasses.dataclass(frozen=True)
+class RiclLiberoDataConfig(DataConfigFactory):
+    """Config for LIBERO RICL priming datasets."""
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: pi0_fast_ricl.Pi0FASTRiclConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[_transforms.IdentityTransform()],
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[
+                libero_policy.RiclLiberoInputs(
+                    action_dim=model_config.action_dim,
+                    num_retrieved_observations=model_config.num_retrieved_observations,
+                )
+            ],
+            outputs=[libero_policy.RiclLiberoOutputs()],
+        )
+
+        model_transforms = _transforms.Group(
+            inputs=[
+                _transforms.ResizeImagesRicl(224, 224, model_config.num_retrieved_observations),
+                _transforms.TokenizeFASTInputsRicl(
+                    _tokenizer.FASTTokenizerRicl(
+                        max_len=model_config.max_token_len,
+                        action_horizon=model_config.action_horizon,
+                        action_dim=model_config.action_dim,
+                    ),
+                    num_retrieved_observations=model_config.num_retrieved_observations,
+                ),
+            ],
+            outputs=[
+                _transforms.ExtractFASTActionsRicl(
+                    _tokenizer.FASTTokenizerRicl(
+                        max_len=model_config.max_token_len,
+                        action_horizon=model_config.action_horizon,
+                        action_dim=model_config.action_dim,
+                    ),
+                    action_horizon=model_config.action_horizon,
+                    action_dim=model_config.action_dim,
+                )
+            ],
+        )
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+
 @dataclasses.dataclass(frozen=True)
 class TrainConfig:
     # Name of the config. Must be unique. Will be used to reference this config.
@@ -516,6 +570,46 @@ _CONFIGS = [
             default_prompt="open the tupperware and put the food on the plate",
         ),
     ),
+
+    #
+    # RICL-Pi0-FAST-LIBERO configs.
+    #
+    TrainConfig(
+        name="pi0_fast_libero_ricl",
+        finetuning_collected_demos_dir="ricl_libero_preprocessing/collected_demos_training",
+        model=pi0_fast_ricl.Pi0FASTRiclConfig(
+            action_dim=7,
+            action_horizon=10,
+            max_token_len=180,
+            num_retrieved_observations=4,
+            use_action_interpolation=True,
+            lamda=10.0,
+        ),
+        data=RiclLiberoDataConfig(
+            repo_id=None,
+            assets=AssetsConfig(asset_id="libero"),
+            base_config=DataConfig(prompt_from_task=False),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_fast_base/params"),
+        num_train_steps=10_000,
+        batch_size=16,
+        freeze_filter=pi0_fast_ricl.Pi0FASTRiclConfig(
+            action_dim=7,
+            action_horizon=10,
+            max_token_len=180,
+            num_retrieved_observations=4,
+            use_action_interpolation=True,
+            lamda=10.0,
+        ).get_freeze_filter_with_frozen_img_encoder(),
+        ema_decay=None,
+        log_interval=1,
+        save_interval=300,
+        keep_period=300,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=300, peak_lr=2.5e-5, decay_steps=3000, decay_lr=2.5e-6
+        ),
+    ),
+
     #
     # Inference DROID configs.
     #

@@ -97,6 +97,21 @@ def get_action_chunk(action_joint_vels, action_gripper_pos, step_idx, action_hor
     return action_chunk
 
 
+
+def get_action_chunk_from_actions(actions, step_idx, action_horizon):
+    num_steps = len(actions)
+    action_dim = actions.shape[-1]
+    action_chunk = []
+    for i in range(action_horizon):
+        if step_idx + i < num_steps:
+            action_chunk.append(actions[step_idx + i])
+        else:
+            action_chunk.append(np.zeros(action_dim, dtype=np.float32))
+    action_chunk = np.stack(action_chunk, axis=0)
+    assert action_chunk.shape == (action_horizon, action_dim), f"{action_chunk.shape=}"
+    return action_chunk
+
+
 class Pi0FastDroidFinetuneDataset(Dataset):
     def __init__(self, model_config: _pi0_fast_ricl.Pi0FASTRiclConfig, finetuning_collected_demos_dir: str | None):
         assert finetuning_collected_demos_dir is not None
@@ -299,6 +314,126 @@ class RiclDroidDataset(Dataset):
         return self.len_dataset
 
 
+
+def _resolve_demo_path(base_dir: str, demo_path: str) -> str:
+    demo_path = os.path.expanduser(demo_path)
+    if os.path.isabs(demo_path) and os.path.exists(demo_path):
+        return demo_path
+    if os.path.exists(demo_path):
+        return demo_path
+    return os.path.join(base_dir, demo_path)
+
+
+class RiclLiberoDataset(Dataset):
+    def __init__(self, model_config: _pi0_fast_ricl.Pi0FASTRiclConfig, finetuning_collected_demos_dir: str | None):
+        num_retrieved_observations = model_config.num_retrieved_observations
+        knn_k = 100
+        assert num_retrieved_observations <= knn_k
+
+        outer_dir = (
+            "ricl_libero_preprocessing/collected_demos_training"
+            if finetuning_collected_demos_dir is None
+            else finetuning_collected_demos_dir
+        )
+        collected_demos_infos = {
+            k: json.load(open(f"{outer_dir}/{k}.json"))
+            for k in ["ep_idxs_to_fol", "fols_to_ep_idxs", "groups_to_ep_fols", "groups_to_ep_idxs"]
+        }
+
+        indices_files = []
+        for ep_fols in collected_demos_infos["groups_to_ep_fols"].values():
+            for ep_fol in ep_fols:
+                ep_path = _resolve_demo_path(outer_dir, ep_fol)
+                indices_files.append(os.path.join(ep_path, "indices_and_distances.npz"))
+
+        all_retrieved_indices = []
+        all_query_indices = []
+        all_distances = []
+
+        for file_path in indices_files:
+            indices_and_dists = np.load(file_path)
+            query_indices = indices_and_dists["query_indices"]
+            retrieved_indices = indices_and_dists["retrieved_indices"][:, :num_retrieved_observations, :]
+            distances = np.concatenate(
+                (
+                    indices_and_dists["distances"][:, :num_retrieved_observations],
+                    indices_and_dists["distances"][:, -1:],
+                ),
+                axis=1,
+            )
+            all_retrieved_indices.append(retrieved_indices)
+            all_query_indices.append(query_indices)
+            all_distances.append(distances)
+
+        all_retrieved_indices = np.concatenate(all_retrieved_indices, axis=0)
+        all_query_indices = np.concatenate(all_query_indices, axis=0)
+        all_distances = np.concatenate(all_distances, axis=0)
+        len_dataset = all_retrieved_indices.shape[0]
+
+        assert all_retrieved_indices.shape == (len_dataset, num_retrieved_observations, 2)
+        assert all_query_indices.shape == (len_dataset, 2)
+        assert all_distances.shape == (len_dataset, num_retrieved_observations + 1)
+
+        max_dist_value = float(np.max(all_distances)) if len(all_distances) else 1.0
+        if max_dist_value == 0:
+            max_dist_value = 1.0
+        all_distances = (all_distances / max_dist_value).astype(np.float32)
+
+        all_ep_idxs = list(np.unique(all_retrieved_indices[:, :, 0])) + list(np.unique(all_query_indices[:, 0]))
+        all_ep_data_paths = {
+            ep_idx: os.path.join(
+                _resolve_demo_path(outer_dir, collected_demos_infos["ep_idxs_to_fol"][str(ep_idx)]),
+                "processed_demo.npz",
+            )
+            for ep_idx in all_ep_idxs
+        }
+
+        self.len_dataset = len_dataset
+        self.all_ep_data_paths = all_ep_data_paths
+        self.all_retrieved_indices = all_retrieved_indices
+        self.all_query_indices = all_query_indices
+        self.all_distances = all_distances
+        self.use_action_interpolation = model_config.use_action_interpolation
+        self.lamda = model_config.lamda
+        self.action_horizon = model_config.action_horizon
+
+    def __getitem__(self, index: SupportsIndex) -> dict:
+        retrieved_indices = self.all_retrieved_indices[index, :, :]
+        query_ep_idx, query_step_idx = self.all_query_indices[index, :]
+
+        ep_idxs = list(np.unique(retrieved_indices[:, 0])) + [query_ep_idx]
+        ep_data = {ep_idx: np.load(self.all_ep_data_paths[ep_idx]) for ep_idx in ep_idxs}
+        data = {}
+
+        for ct, (ep_idx, step_idx) in enumerate(retrieved_indices):
+            prefix = f"retrieved_{ct}_"
+            data[f"{prefix}top_image"] = ep_data[ep_idx]["top_image"][step_idx]
+            data[f"{prefix}wrist_image"] = ep_data[ep_idx]["wrist_image"][step_idx]
+            data[f"{prefix}state"] = ep_data[ep_idx]["state"][step_idx]
+            data[f"{prefix}actions"] = get_action_chunk_from_actions(
+                ep_data[ep_idx]["actions"], step_idx, self.action_horizon
+            )
+            data[f"{prefix}prompt"] = ep_data[ep_idx]["prompt"].item()
+
+        prefix = "query_"
+        data[f"{prefix}top_image"] = ep_data[query_ep_idx]["top_image"][query_step_idx]
+        data[f"{prefix}wrist_image"] = ep_data[query_ep_idx]["wrist_image"][query_step_idx]
+        data[f"{prefix}state"] = ep_data[query_ep_idx]["state"][query_step_idx]
+        data[f"{prefix}actions"] = get_action_chunk_from_actions(
+            ep_data[query_ep_idx]["actions"], query_step_idx, self.action_horizon
+        )
+        data[f"{prefix}prompt"] = ep_data[query_ep_idx]["prompt"].item()
+
+        if self.use_action_interpolation:
+            distances = self.all_distances[index, :]
+            data["exp_lamda_distances"] = np.exp(-self.lamda * distances).reshape(-1, 1)
+
+        return data
+
+    def __len__(self) -> int:
+        return self.len_dataset
+
+
 def create_dataset(data_config: _config.DataConfig, model_config: _model.BaseModelConfig) -> Dataset:
     """Create a dataset for training."""
     repo_id = data_config.repo_id
@@ -371,7 +506,10 @@ def create_data_loader(
     data_config = config.data.create(config.assets_dirs, config.model)
 
     if "ricl" in config.name:
-        dataset = RiclDroidDataset(config.model, config.finetuning_collected_demos_dir)
+        if "libero" in config.name:
+            dataset = RiclLiberoDataset(config.model, config.finetuning_collected_demos_dir)
+        else:
+            dataset = RiclDroidDataset(config.model, config.finetuning_collected_demos_dir)
     elif "pi0_fast_droid___finetune_on_" in config.name:
         dataset = Pi0FastDroidFinetuneDataset(config.model, config.finetuning_collected_demos_dir)
     else:
