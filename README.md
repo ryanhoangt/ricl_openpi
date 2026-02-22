@@ -7,7 +7,7 @@ A RICL version of the openpi repository focused on RICL-Pi0-FAST-DROID.
 ```bash
 GIT_LFS_SKIP_SMUDGE=1 uv sync
 source .venv/bin/activate
-uv pip install tensorflow-datasets tensorflow-cpu autofaiss google-genai openai
+uv pip install --python .venv/bin/python tensorflow-datasets tensorflow-cpu autofaiss google-genai openai
 ```
 
 ## Quickstart
