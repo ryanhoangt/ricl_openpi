@@ -135,8 +135,38 @@ class RiclPolicy(BasePolicy):
         self._max_dist = json.load(open(f"assets/max_distance.json", 'r'))['distances']['max']
         print(f'self._max_dist: {self._max_dist} [helpful to carefully check this value in case of any issues]')
 
+    def _ensure_query_keys(self, obs: dict) -> dict:
+        if "query_top_image" not in obs:
+            if "observation/image" in obs:
+                obs["query_top_image"] = obs["observation/image"]
+            elif "image" in obs:
+                obs["query_top_image"] = obs["image"]
+            elif "top_image" in obs:
+                obs["query_top_image"] = obs["top_image"]
+
+        if "query_wrist_image" not in obs:
+            if "observation/wrist_image" in obs:
+                obs["query_wrist_image"] = obs["observation/wrist_image"]
+            elif "wrist_image" in obs:
+                obs["query_wrist_image"] = obs["wrist_image"]
+
+        if "query_state" not in obs:
+            if "observation/state" in obs:
+                obs["query_state"] = obs["observation/state"]
+            elif "state" in obs:
+                obs["query_state"] = obs["state"]
+
+        if "query_prompt" not in obs and "prompt" in obs:
+            obs["query_prompt"] = obs["prompt"]
+
+        if "query_top_image" in obs and "query_right_image" not in obs:
+            obs["query_right_image"] = np.zeros_like(obs["query_top_image"])
+
+        return obs
+
     def retrieve(self, obs: dict) -> dict:
         more_obs = {"inference_time": True}
+        obs = self._ensure_query_keys(obs)
         # embed
         query_embedding = embed(obs["query_top_image"], self._dinov2)
         assert query_embedding.shape == (1, EMBED_DIM), f"{query_embedding.shape=}"
@@ -146,10 +176,16 @@ class RiclPolicy(BasePolicy):
         assert retrieved_indices.shape == (1, self._knn_k, 2), f"{retrieved_indices.shape=}"
         # collect retrieved info
         for ct, (ep_idx, step_idx) in enumerate(retrieved_indices[0]):
-            for key in ["state", "wrist_image", "top_image", "right_image"]:
-                more_obs[f"retrieved_{ct}_{key}"] = self._demos[ep_idx][key][step_idx]
-            more_obs[f"retrieved_{ct}_actions"] = get_action_chunk_at_inference_time(self._demos[ep_idx]["actions"], step_idx, self._action_horizon)
-            more_obs[f"retrieved_{ct}_prompt"] = self._demos[ep_idx]["prompt"].item()
+            demo = self._demos[ep_idx]
+            more_obs[f"retrieved_{ct}_state"] = demo["state"][step_idx]
+            more_obs[f"retrieved_{ct}_wrist_image"] = demo["wrist_image"][step_idx]
+            more_obs[f"retrieved_{ct}_top_image"] = demo["top_image"][step_idx]
+            if "right_image" in demo:
+                more_obs[f"retrieved_{ct}_right_image"] = demo["right_image"][step_idx]
+            else:
+                more_obs[f"retrieved_{ct}_right_image"] = np.zeros_like(more_obs[f"retrieved_{ct}_top_image"])
+            more_obs[f"retrieved_{ct}_actions"] = get_action_chunk_at_inference_time(demo["actions"], step_idx, self._action_horizon)
+            more_obs[f"retrieved_{ct}_prompt"] = demo["prompt"].item()
         # Compute exp_lamda_distances if use_action_interpolation
         if self._use_action_interpolation:
             first_embedding = self._demos[retrieved_indices[0, 0, 0]]["top_image_embeddings"][retrieved_indices[0, 0, 1]]
