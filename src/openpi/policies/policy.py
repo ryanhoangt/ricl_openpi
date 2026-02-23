@@ -74,14 +74,17 @@ class Policy(BasePolicy):
 
 def get_action_chunk_at_inference_time(actions, step_idx, action_horizon):
     num_steps = len(actions)
+    action_dim = actions.shape[-1]
     action_chunk = []
     for i in range(action_horizon):
-        if step_idx+i < num_steps:
-            action_chunk.append(actions[step_idx+i])
+        if step_idx + i < num_steps:
+            action_chunk.append(actions[step_idx + i])
         else:
-            action_chunk.append(np.concatenate([np.zeros(actions.shape[-1]-1, dtype=np.float32), actions[-1, -1:]], axis=0)) # combines 0 joint vels with last gripper pos
+            action_chunk.append(
+                np.concatenate([np.zeros(action_dim - 1, dtype=np.float32), actions[-1, -1:]], axis=0)
+            )  # combines 0 joint vels with last gripper pos
     action_chunk = np.stack(action_chunk, axis=0)
-    assert action_chunk.shape == (action_horizon, 8), f"{action_chunk.shape=}"
+    assert action_chunk.shape == (action_horizon, action_dim), f"{action_chunk.shape=}"
     return action_chunk
 
 
