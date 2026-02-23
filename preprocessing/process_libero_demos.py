@@ -99,6 +99,7 @@ def process_episodes(
     group_by_task: bool,
     episodes: list[int],
     max_episodes: int | None,
+    max_episode_per_task: int | None,
     resize: int,
     image_key: str,
     wrist_key: str,
@@ -109,6 +110,22 @@ def process_episodes(
 ) -> None:
     metadata = LeRobotDatasetMetadata(repo_id, root=root, local_files_only=local_files_only)
     episode_prompts = _episode_prompt(metadata)
+
+    # -------------------------------------------------------
+    # NEW FEATURE: Limit number of episodes per task
+    # -------------------------------------------------------
+    if group_by_task and max_episode_per_task is not None:
+        task_to_episodes: dict[str, list[int]] = {}
+        for ep in episodes:
+            task_name = episode_prompts.get(ep, "")
+            task_name = _sanitize_group_name(task_name or "group")
+            task_to_episodes.setdefault(task_name, []).append(ep)
+
+        limited = []
+        for task, eps in task_to_episodes.items():
+            limited.extend(eps[:max_episode_per_task])
+        episodes = limited
+        logger.info("Applying per-task episode limit: %d episodes per task", max_episode_per_task)
 
     dataset = LeRobotDataset(
         repo_id=repo_id,
@@ -185,6 +202,7 @@ def main() -> None:
     parser.add_argument("--group-by-task", action="store_true")
     parser.add_argument("--episodes", type=str, default=None)
     parser.add_argument("--max-episodes", type=int, default=None)
+    parser.add_argument("--max-episode-per-task", type=int, default=None)
     parser.add_argument("--resize", type=int, default=224)
     parser.add_argument("--image-key", type=str, default="image")
     parser.add_argument("--wrist-key", type=str, default="wrist_image")
@@ -207,6 +225,7 @@ def main() -> None:
         group_by_task=args.group_by_task,
         episodes=episodes,
         max_episodes=args.max_episodes,
+        max_episode_per_task=args.max_episode_per_task,  # Pass new arg
         resize=args.resize,
         image_key=args.image_key,
         wrist_key=args.wrist_key,
