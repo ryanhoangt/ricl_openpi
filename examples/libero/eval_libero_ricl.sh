@@ -7,4 +7,4 @@ MUJOCO_GL=egl docker compose -f examples/libero/compose.yml up --build
 export RICL_CONFIG=pi0_fast_libero_ricl_low_mem
 export RICL_CHECKPOINT=/app/checkpoints/pi0_fast_libero_icl_priming_lora_ckpt_4500
 export RICL_DEMOS=/app/ricl_libero_preprocessing/collected_demos/libero_group/pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate
-MUJOCO_GL=egl docker compose -f examples/libero/compose.yml -f examples/libero/compose.ricl.yml up --build
+docker compose -f examples/libero/compose.yml -f examples/libero/compose.ricl.yml up --build
