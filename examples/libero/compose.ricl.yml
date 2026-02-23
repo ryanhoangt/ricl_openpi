@@ -1,0 +1,7 @@
+services:
+  openpi_server:
+    command: >
+      /bin/bash -c "uv run scripts/serve_policy_ricl.py
+      --policy.config ${RICL_CONFIG}
+      --policy.dir ${RICL_CHECKPOINT}
+      --policy.demos_dir ${RICL_DEMOS}"
