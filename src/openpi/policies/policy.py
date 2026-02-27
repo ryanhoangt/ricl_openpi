@@ -102,6 +102,7 @@ class RiclPolicy(BasePolicy):
         use_action_interpolation: bool | None = None,
         lamda: float | None = None,
         action_horizon: int | None = None,
+        max_distance_file: str = "assets/max_distance.json",
     ):
         self._sample_actions = nnx_utils.module_jit(model.sample_actions)
         self._input_transform = _transforms.compose(transforms)
@@ -135,8 +136,8 @@ class RiclPolicy(BasePolicy):
         # setup the dinov2 model for embedding only
         logger.info('loading dinov2 for image embedding...')
         self._dinov2 = load_dinov2()
-        self._max_dist = json.load(open(f"assets/max_distance.json", 'r'))['distances']['max']
-        print(f'self._max_dist: {self._max_dist} [helpful to carefully check this value in case of any issues]')
+        self._max_dist = json.load(open(max_distance_file, 'r'))['distances']['max']
+        print(f'self._max_dist: {self._max_dist} (from {max_distance_file}) [helpful to carefully check this value in case of any issues]')
 
     def _ensure_query_keys(self, obs: dict) -> dict:
         if "query_top_image" not in obs:

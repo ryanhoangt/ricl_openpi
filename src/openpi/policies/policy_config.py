@@ -89,6 +89,7 @@ def create_trained_ricl_policy(
     checkpoint_dir: str,
     demos_dir: str,
     norm_stats: dict[str, transforms.NormStats] | None = None,
+    max_distance_file: str = "assets/max_distance.json",
 ) -> _policy.RiclPolicy:
     """Create a ricl policy from a trained checkpoint.
 
@@ -98,6 +99,7 @@ def create_trained_ricl_policy(
         demos_dir: The directory to load the demos from.
         norm_stats: The norm stats to use for the policy. If not provided, the norm stats will be loaded
             from the checkpoint directory.
+        max_distance_file: Path to the max_distance.json file for distance normalization.
     """
     logging.info("Loading model...")
     model = train_config.model.load(_model.restore_params(f"{checkpoint_dir}/params", dtype=jnp.bfloat16))
@@ -127,4 +129,5 @@ def create_trained_ricl_policy(
         use_action_interpolation=train_config.model.use_action_interpolation,
         lamda=train_config.model.lamda,
         action_horizon=train_config.model.action_horizon,
+        max_distance_file=max_distance_file,
     )

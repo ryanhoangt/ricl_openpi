@@ -1,4 +1,5 @@
 from collections.abc import Iterator, Sequence
+import logging
 import multiprocessing
 import os
 import typing
@@ -377,6 +378,16 @@ class RiclLiberoDataset(Dataset):
         max_dist_value = float(np.max(all_distances)) if len(all_distances) else 1.0
         if max_dist_value == 0:
             max_dist_value = 1.0
+        logging.info(
+            f"RiclLiberoDataset max_dist_value={max_dist_value:.6f} "
+            f"— save this to a max_distance.json for inference!"
+        )
+        # Save max_distance alongside the training data for inference use
+        max_dist_file = os.path.join(outer_dir, "max_distance.json")
+        with open(max_dist_file, "w") as f:
+            json.dump({"distances": {"max": max_dist_value}}, f, indent=2)
+        logging.info(f"Saved max_distance to {max_dist_file}")
+
         all_distances = (all_distances / max_dist_value).astype(np.float32)
 
         all_ep_idxs = list(np.unique(all_retrieved_indices[:, :, 0])) + list(np.unique(all_query_indices[:, 0]))

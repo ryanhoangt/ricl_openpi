@@ -30,6 +30,8 @@ class Checkpoint:
     dir: str
     # Demos directory (e.g., "ricl_droid_preprocessing/collected_demos/2025-03-04").
     demos_dir: str
+    # Path to max_distance.json for distance normalization during action interpolation.
+    max_distance_file: str = "assets/max_distance.json"
 
 
 @dataclasses.dataclass
@@ -60,7 +62,9 @@ class Args:
 def create_policy(args: Args) -> _policy.Policy:
     """Create a policy from the given arguments."""
     return _policy_config.create_trained_ricl_policy(
-        _config.get_config(args.policy.config), args.policy.dir, demos_dir=args.policy.demos_dir
+        _config.get_config(args.policy.config), args.policy.dir,
+        demos_dir=args.policy.demos_dir,
+        max_distance_file=args.policy.max_distance_file,
     )
 
 
