@@ -169,5 +169,6 @@ class RiclLiberoInputs(transforms.DataTransformFn):
 @dataclasses.dataclass(frozen=True)
 class RiclLiberoOutputs(transforms.DataTransformFn):
     def __call__(self, data: dict) -> dict:
-        return {"query_actions": np.asarray(data["query_actions"])}
+        actions = np.asarray(data["query_actions"])
+        return {"actions": actions, "query_actions": actions}
 
