@@ -132,18 +132,24 @@ class RiclLiberoInputs(transforms.DataTransformFn):
         for prefix in all_prefix:
             base_image = _parse_image(data[f"{prefix}top_image"])
             wrist_image = _parse_image(data[f"{prefix}wrist_image"])
+            # Image key order MUST match LiberoInputs (used for SFT) so that
+            # the SigLip positional slots are consistent across SFT → RICL:
+            #   pos 0 = base_0_rgb (base camera)
+            #   pos 1 = left_wrist_0_rgb (wrist camera)
+            #   pos 2 = right_wrist_0_rgb (zeros / unused)
+            # PI0_FAST does not mask padding images, so all masks are True.
             inputs_dicts.append(
                 {
                     f"{prefix}state": data[f"{prefix}state"],
                     f"{prefix}image": {
                         "base_0_rgb": base_image,
-                        "base_1_rgb": np.zeros_like(base_image),
-                        "wrist_0_rgb": wrist_image,
+                        "left_wrist_0_rgb": wrist_image,
+                        "right_wrist_0_rgb": np.zeros_like(base_image),
                     },
                     f"{prefix}image_mask": {
                         "base_0_rgb": np.True_,
-                        "base_1_rgb": np.False_,
-                        "wrist_0_rgb": np.True_,
+                        "left_wrist_0_rgb": np.True_,
+                        "right_wrist_0_rgb": np.True_,
                     },
                 }
             )
