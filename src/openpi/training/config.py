@@ -25,6 +25,7 @@ import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.optimizer as _optimizer
+from openpi.training.optimizer import MultiGroupAdamW
 import openpi.training.weight_loaders as weight_loaders
 import openpi.transforms as _transforms
 
@@ -692,6 +693,8 @@ _CONFIGS = [
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=300, peak_lr=2.5e-5, decay_steps=3000, decay_lr=2.5e-6
         ),
+        # Perceiver (random init) gets full lr; LLM (pretrained) gets lr * 0.1.
+        optimizer=MultiGroupAdamW(llm_lr_scale=0.1),
     ),
 
     TrainConfig(
@@ -732,6 +735,8 @@ _CONFIGS = [
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=300, peak_lr=2.5e-5, decay_steps=3000, decay_lr=2.5e-6
         ),
+        # LoRA adapters (inside llm path) get lr * 0.1; perceiver gets full lr.
+        optimizer=MultiGroupAdamW(llm_lr_scale=0.1),
     ),
 
 
