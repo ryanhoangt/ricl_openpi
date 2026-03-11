@@ -16,6 +16,7 @@ import tyro
 import openpi.models.model as _model
 import openpi.models.pi0 as pi0
 import openpi.models.pi0_fast as pi0_fast
+import openpi.models.pi0_fast_perceiver_ricl as pi0_fast_perceiver_ricl
 import openpi.models.pi0_fast_ricl as pi0_fast_ricl
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
@@ -647,6 +648,90 @@ _CONFIGS = [
             warmup_steps=300, peak_lr=2.5e-5, decay_steps=3000, decay_lr=2.5e-6
         ),
         wandb_enabled=False,
+    ),
+
+    #
+    # Perceiver-RICL LIBERO configs.
+    # Uses PerceiverResampler to compress retrieved samples into fixed-size latents
+    # instead of brittle action interpolation.
+    #
+    TrainConfig(
+        name="pi0_fast_libero_perceiver_ricl",
+        finetuning_collected_demos_dir="ricl_libero_preprocessing/collected_demos_training",
+        model=pi0_fast_perceiver_ricl.Pi0FASTPerceiverRiclConfig(
+            action_dim=7,
+            action_horizon=10,
+            max_token_len=180,
+            num_retrieved_observations=4,
+            lamda=10.0,
+            num_latents=32,
+            use_action_interpolation=True,  # triggers distance loading in data loader
+        ),
+        data=RiclLiberoDataConfig(
+            repo_id=None,
+            assets=AssetsConfig(asset_id="libero"),
+            base_config=DataConfig(prompt_from_task=False),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("PATH_TO_SFT_CHECKPOINT/params"),
+        num_train_steps=10_000,
+        batch_size=16,
+        # Freeze the image encoder; the perceiver + LLM head are trainable.
+        freeze_filter=pi0_fast_perceiver_ricl.Pi0FASTPerceiverRiclConfig(
+            action_dim=7,
+            action_horizon=10,
+            max_token_len=180,
+            num_retrieved_observations=4,
+            lamda=10.0,
+            num_latents=32,
+            use_action_interpolation=True,
+        ).get_freeze_filter_with_frozen_img_encoder(),
+        ema_decay=None,
+        log_interval=1,
+        save_interval=300,
+        keep_period=300,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=300, peak_lr=2.5e-5, decay_steps=3000, decay_lr=2.5e-6
+        ),
+    ),
+
+    TrainConfig(
+        name="pi0_fast_libero_perceiver_ricl_low_mem",
+        finetuning_collected_demos_dir="ricl_libero_preprocessing/collected_demos_training",
+        model=pi0_fast_perceiver_ricl.Pi0FASTPerceiverRiclConfig(
+            action_dim=7,
+            action_horizon=10,
+            max_token_len=180,
+            num_retrieved_observations=4,
+            lamda=10.0,
+            num_latents=32,
+            paligemma_variant="gemma_2b_lora",
+            use_action_interpolation=True,  # triggers distance loading in data loader
+        ),
+        data=RiclLiberoDataConfig(
+            repo_id=None,
+            assets=AssetsConfig(asset_id="libero"),
+            base_config=DataConfig(prompt_from_task=False),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("PATH_TO_SFT_CHECKPOINT/params"),
+        num_train_steps=10_000,
+        batch_size=16,
+        freeze_filter=pi0_fast_perceiver_ricl.Pi0FASTPerceiverRiclConfig(
+            action_dim=7,
+            action_horizon=10,
+            max_token_len=180,
+            num_retrieved_observations=4,
+            lamda=10.0,
+            num_latents=32,
+            paligemma_variant="gemma_2b_lora",
+            use_action_interpolation=True,
+        ).get_freeze_filter_with_frozen_img_encoder(),
+        ema_decay=None,
+        log_interval=1,
+        save_interval=300,
+        keep_period=300,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=300, peak_lr=2.5e-5, decay_steps=3000, decay_lr=2.5e-6
+        ),
     ),
 
 
