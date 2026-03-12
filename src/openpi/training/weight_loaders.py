@@ -43,15 +43,23 @@ class CheckpointWeightLoader(WeightLoader):
         example: "./checkpoints/<config>/<exp>/<step>/params"
       released checkpoints:
         example: "s3://openpi-assets/checkpoints/<model>/params"
+
+    Args:
+        params_path: Path to the checkpoint params directory.
+        missing_regex: Regex for keys that are allowed to be absent from the
+            checkpoint and will be kept at their randomly-initialised values.
+            Default covers LoRA weights only.  Use ".*lora.*|.*perceiver.*"
+            when loading a non-RICL checkpoint into a perceiver-RICL model.
     """
 
     params_path: str
+    missing_regex: str = ".*lora.*"
 
     def load(self, params: at.Params) -> at.Params:
         # We are loading np.ndarray and relying on the training code to properly convert and shard the params.
         loaded_params = _model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray)
-        # Add all missing LoRA weights.
-        return _merge_params(loaded_params, params, missing_regex=".*lora.*")
+        # Add all missing weights that match missing_regex from the reference params.
+        return _merge_params(loaded_params, params, missing_regex=self.missing_regex)
 
 
 @dataclasses.dataclass(frozen=True)

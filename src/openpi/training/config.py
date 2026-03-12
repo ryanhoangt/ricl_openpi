@@ -659,7 +659,7 @@ _CONFIGS = [
     #
     TrainConfig(
         name="pi0_fast_libero_perceiver_ricl",
-        finetuning_collected_demos_dir="ricl_libero_preprocessing/collected_demos_training",
+        finetuning_collected_demos_dir="preprocessing/collected_demos_training",
         model=pi0_fast_perceiver_ricl.Pi0FASTPerceiverRiclConfig(
             action_dim=7,
             action_horizon=10,
@@ -674,9 +674,12 @@ _CONFIGS = [
             assets=AssetsConfig(asset_id="libero"),
             base_config=DataConfig(prompt_from_task=False),
         ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("PATH_TO_SFT_CHECKPOINT/params"),
-        num_train_steps=10_000,
-        batch_size=16,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            params_path="/mnt/data/vhoangth2/ckpts/openpi/checkpoints/pi0_fast_libero/finetune_pi0fast_libero_icl_job/14999/params",
+            missing_regex=".*lora.*|.*perceiver.*",
+        ),
+        num_train_steps=15_000,
+        batch_size=8,
         # Freeze the image encoder; the perceiver + LLM head are trainable.
         freeze_filter=pi0_fast_perceiver_ricl.Pi0FASTPerceiverRiclConfig(
             action_dim=7,
@@ -689,8 +692,7 @@ _CONFIGS = [
         ).get_freeze_filter_with_frozen_img_encoder(),
         ema_decay=None,
         log_interval=1,
-        save_interval=300,
-        keep_period=300,
+        save_interval=5000,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=300, peak_lr=2.5e-5, decay_steps=3000, decay_lr=2.5e-6
         ),
@@ -700,7 +702,7 @@ _CONFIGS = [
 
     TrainConfig(
         name="pi0_fast_libero_perceiver_ricl_low_mem",
-        finetuning_collected_demos_dir="ricl_libero_preprocessing/collected_demos_training",
+        finetuning_collected_demos_dir="preprocessing/collected_demos_training",
         model=pi0_fast_perceiver_ricl.Pi0FASTPerceiverRiclConfig(
             action_dim=7,
             action_horizon=10,
@@ -716,7 +718,10 @@ _CONFIGS = [
             assets=AssetsConfig(asset_id="libero"),
             base_config=DataConfig(prompt_from_task=False),
         ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("PATH_TO_SFT_CHECKPOINT/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            params_path="PATH_TO_SFT_CHECKPOINT/params",
+            missing_regex=".*lora.*|.*perceiver.*",
+        ),
         num_train_steps=10_000,
         batch_size=16,
         freeze_filter=pi0_fast_perceiver_ricl.Pi0FASTPerceiverRiclConfig(
