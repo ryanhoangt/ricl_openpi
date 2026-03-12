@@ -578,7 +578,7 @@ _CONFIGS = [
     #
     TrainConfig(
         name="pi0_fast_libero_ricl",
-        finetuning_collected_demos_dir="ricl_libero_preprocessing/collected_demos_training",
+        finetuning_collected_demos_dir="preprocessing/collected_demos_training",
         model=pi0_fast_ricl.Pi0FASTRiclConfig(
             action_dim=7,
             action_horizon=10,
@@ -592,9 +592,9 @@ _CONFIGS = [
             assets=AssetsConfig(asset_id="libero"),
             base_config=DataConfig(prompt_from_task=False),
         ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("PATH_TO_SFT_CHECKPOINT/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/mnt/data/vhoangth2/ckpts/openpi/checkpoints/pi0_fast_libero/finetune_pi0fast_libero_icl_job/14999/params"), # TODO: change this after SFT
         num_train_steps=10_000,
-        batch_size=16,
+        batch_size=8,
         freeze_filter=pi0_fast_ricl.Pi0FASTRiclConfig(
             action_dim=7,
             action_horizon=10,
@@ -605,11 +605,12 @@ _CONFIGS = [
         ).get_freeze_filter_with_frozen_img_encoder(),
         ema_decay=None,
         log_interval=1,
-        save_interval=300,
+        save_interval=5000,
         keep_period=300,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=300, peak_lr=2.5e-5, decay_steps=3000, decay_lr=2.5e-6
         ),
+        # wandb_enabled=False,
     ),
 
     TrainConfig(
