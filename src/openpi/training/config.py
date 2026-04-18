@@ -666,7 +666,7 @@ _CONFIGS = [
             max_token_len=180,
             num_retrieved_observations=4,
             lamda=10.0,
-            num_latents=32,
+            num_latents=64,
             use_action_interpolation=True,  # triggers distance loading in data loader
         ),
         data=RiclLiberoDataConfig(
@@ -694,10 +694,10 @@ _CONFIGS = [
         log_interval=1,
         save_interval=5000,
         lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=300, peak_lr=2.5e-5, decay_steps=3000, decay_lr=2.5e-6
+            warmup_steps=1000, peak_lr=1e-4, decay_steps=14000, decay_lr=1e-5
         ),
-        # Perceiver (random init) gets full lr; LLM (pretrained) gets lr * 0.1.
-        optimizer=MultiGroupAdamW(llm_lr_scale=0.1),
+        # Perceiver (random init) gets full lr; LLM (pretrained) gets lr * scale.
+        optimizer=MultiGroupAdamW(llm_lr_scale=0.05),
     ),
 
     TrainConfig(
