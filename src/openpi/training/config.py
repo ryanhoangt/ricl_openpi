@@ -257,6 +257,8 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
     For your own dataset, you can copy this class and modify the transforms to match your dataset based on the
     comments below.
     """
+    
+    extra_delta_transform: bool = False
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -303,11 +305,14 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
         # apply a separate delta conversion (that's why it's commented out). Choose whether to apply this
         # transform based on whether your dataset uses ``absolute`` or ``delta`` actions out of the box.
 
-        # delta_action_mask = _transforms.make_bool_mask(6, -1)
-        # data_transforms = data_transforms.push(
-        #     inputs=[_transforms.DeltaActions(delta_action_mask)],
-        #     outputs=[_transforms.AbsoluteActions(delta_action_mask)],
-        # )
+        # LIBERO already represents actions as deltas, but checkpoints trained with extra_delta_transform=True
+        # expect this transform to be applied at inference time (AbsoluteActions undoes the double-delta).
+        if self.extra_delta_transform:
+            delta_action_mask = _transforms.make_bool_mask(6, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
 
         # Model transforms include things like tokenizing the prompt and action targets
         # You do not need to change anything here for your own dataset.
