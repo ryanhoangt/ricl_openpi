@@ -74,14 +74,17 @@ class Policy(BasePolicy):
 
 def get_action_chunk_at_inference_time(actions, step_idx, action_horizon):
     num_steps = len(actions)
+    action_dim = actions.shape[-1]
     action_chunk = []
     for i in range(action_horizon):
-        if step_idx+i < num_steps:
-            action_chunk.append(actions[step_idx+i])
+        if step_idx + i < num_steps:
+            action_chunk.append(actions[step_idx + i])
         else:
-            action_chunk.append(np.concatenate([np.zeros(actions.shape[-1]-1, dtype=np.float32), actions[-1, -1:]], axis=0)) # combines 0 joint vels with last gripper pos
+            action_chunk.append(
+                np.concatenate([np.zeros(action_dim - 1, dtype=np.float32), actions[-1, -1:]], axis=0)
+            )  # combines 0 joint vels with last gripper pos
     action_chunk = np.stack(action_chunk, axis=0)
-    assert action_chunk.shape == (action_horizon, 8), f"{action_chunk.shape=}"
+    assert action_chunk.shape == (action_horizon, action_dim), f"{action_chunk.shape=}"
     return action_chunk
 
 
@@ -99,6 +102,7 @@ class RiclPolicy(BasePolicy):
         use_action_interpolation: bool | None = None,
         lamda: float | None = None,
         action_horizon: int | None = None,
+        max_distance_file: str = "assets/max_distance.json",
     ):
         self._sample_actions = nnx_utils.module_jit(model.sample_actions)
         self._input_transform = _transforms.compose(transforms)
@@ -132,11 +136,41 @@ class RiclPolicy(BasePolicy):
         # setup the dinov2 model for embedding only
         logger.info('loading dinov2 for image embedding...')
         self._dinov2 = load_dinov2()
-        self._max_dist = json.load(open(f"assets/max_distance.json", 'r'))['distances']['max']
-        print(f'self._max_dist: {self._max_dist} [helpful to carefully check this value in case of any issues]')
+        self._max_dist = json.load(open(max_distance_file, 'r'))['distances']['max']
+        print(f'self._max_dist: {self._max_dist} (from {max_distance_file}) [helpful to carefully check this value in case of any issues]')
+
+    def _ensure_query_keys(self, obs: dict) -> dict:
+        if "query_top_image" not in obs:
+            if "observation/image" in obs:
+                obs["query_top_image"] = obs["observation/image"]
+            elif "image" in obs:
+                obs["query_top_image"] = obs["image"]
+            elif "top_image" in obs:
+                obs["query_top_image"] = obs["top_image"]
+
+        if "query_wrist_image" not in obs:
+            if "observation/wrist_image" in obs:
+                obs["query_wrist_image"] = obs["observation/wrist_image"]
+            elif "wrist_image" in obs:
+                obs["query_wrist_image"] = obs["wrist_image"]
+
+        if "query_state" not in obs:
+            if "observation/state" in obs:
+                obs["query_state"] = obs["observation/state"]
+            elif "state" in obs:
+                obs["query_state"] = obs["state"]
+
+        if "query_prompt" not in obs and "prompt" in obs:
+            obs["query_prompt"] = obs["prompt"]
+
+        if "query_top_image" in obs and "query_right_image" not in obs:
+            obs["query_right_image"] = np.zeros_like(obs["query_top_image"])
+
+        return obs
 
     def retrieve(self, obs: dict) -> dict:
         more_obs = {"inference_time": True}
+        obs = self._ensure_query_keys(obs)
         # embed
         query_embedding = embed(obs["query_top_image"], self._dinov2)
         assert query_embedding.shape == (1, EMBED_DIM), f"{query_embedding.shape=}"
@@ -146,10 +180,16 @@ class RiclPolicy(BasePolicy):
         assert retrieved_indices.shape == (1, self._knn_k, 2), f"{retrieved_indices.shape=}"
         # collect retrieved info
         for ct, (ep_idx, step_idx) in enumerate(retrieved_indices[0]):
-            for key in ["state", "wrist_image", "top_image", "right_image"]:
-                more_obs[f"retrieved_{ct}_{key}"] = self._demos[ep_idx][key][step_idx]
-            more_obs[f"retrieved_{ct}_actions"] = get_action_chunk_at_inference_time(self._demos[ep_idx]["actions"], step_idx, self._action_horizon)
-            more_obs[f"retrieved_{ct}_prompt"] = self._demos[ep_idx]["prompt"].item()
+            demo = self._demos[ep_idx]
+            more_obs[f"retrieved_{ct}_state"] = demo["state"][step_idx]
+            more_obs[f"retrieved_{ct}_wrist_image"] = demo["wrist_image"][step_idx]
+            more_obs[f"retrieved_{ct}_top_image"] = demo["top_image"][step_idx]
+            if "right_image" in demo:
+                more_obs[f"retrieved_{ct}_right_image"] = demo["right_image"][step_idx]
+            else:
+                more_obs[f"retrieved_{ct}_right_image"] = np.zeros_like(more_obs[f"retrieved_{ct}_top_image"])
+            more_obs[f"retrieved_{ct}_actions"] = get_action_chunk_at_inference_time(demo["actions"], step_idx, self._action_horizon)
+            more_obs[f"retrieved_{ct}_prompt"] = demo["prompt"].item()
         # Compute exp_lamda_distances if use_action_interpolation
         if self._use_action_interpolation:
             first_embedding = self._demos[retrieved_indices[0, 0, 0]]["top_image_embeddings"][retrieved_indices[0, 0, 1]]

@@ -223,26 +223,34 @@ class FASTTokenizerRicl:
         # Decode predicted output tokens
         decoded_tokens = self._paligemma_tokenizer.decode(tokens.tolist())
 
-        # Extract actions from FAST model outputs
-        if "Action: " not in decoded_tokens:
-            print(f"WARNING: No `Action: ` found in decoded tokens: {decoded_tokens}, so returning zeros")
+        # Extract the action-token substring from decoded output.
+        # Expected format: "Action: <loc...><loc...>...|"
+        # Fallback: if model omits "Action: " prefix, extract everything before "|".
+        if "Action: " in decoded_tokens:
+            action_str = decoded_tokens.split("Action: ")[1].split("|")[0].strip()
+        elif "|" in decoded_tokens:
+            logging.warning(
+                f"No `Action: ` prefix in decoded tokens (falling back to content before '|'): {decoded_tokens}"
+            )
+            action_str = decoded_tokens.split("|")[0].strip()
+        else:
+            logging.warning(
+                f"No `Action: ` or `|` found in decoded tokens, returning zeros: {decoded_tokens}"
+            )
             return np.zeros((action_horizon, action_dim), dtype=np.float32)
 
-        # Extract actions from decoded tokens
-        print(f'decoded_tokens: {decoded_tokens}')
-        raw_action_tokens = np.array(
-            self._paligemma_tokenizer.encode(decoded_tokens.split("Action: ")[1].split("|")[0].strip())
-        )
-        print(f'raw_action_tokens: {raw_action_tokens}')
+        if not action_str:
+            logging.warning("Empty action string after parsing, returning zeros")
+            return np.zeros((action_horizon, action_dim), dtype=np.float32)
+
+        # Re-encode the action substring to get PaliGemma token IDs, then map to FAST token IDs
+        raw_action_tokens = np.array(self._paligemma_tokenizer.encode(action_str))
         action_tokens = self._act_tokens_to_paligemma_tokens(raw_action_tokens)
-        print(f'action_tokens: {action_tokens}')
         outputs = self._fast_tokenizer.decode(
             [action_tokens.tolist()], time_horizon=action_horizon, action_dim=action_dim
         )
         assert outputs.shape == (1, action_horizon, action_dim), f"{outputs.shape=}"
-        outputs = outputs[0]
-        print(f'outputs before normalization: {outputs}')
-        return outputs
+        return outputs[0]
 
     def _act_tokens_to_paligemma_tokens(self, tokens: np.ndarray | list[int]) -> np.ndarray:
         if isinstance(tokens, list):

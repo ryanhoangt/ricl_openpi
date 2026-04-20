@@ -54,7 +54,7 @@ def compute_and_save_simple_norm_stats_for_ricl(num_retrieved):
     
     return norm_stats_basic_file_save_loc
 
-def convert_simple_norm_stats_to_retrieved_and_query_norm_stats(norm_stats_basic_file, num_retrieved):
+def convert_simple_norm_stats_to_retrieved_and_query_norm_stats(norm_stats_basic_file, num_retrieved, output_files=None):
 
     norm_stats_basic = json.load(open(norm_stats_basic_file, 'r'))
 
@@ -66,15 +66,44 @@ def convert_simple_norm_stats_to_retrieved_and_query_norm_stats(norm_stats_basic
         prefix = f"query_"
         new_norm_stats["norm_stats"][f"{prefix}{key}"] = norm_stats_basic["norm_stats"][key]
 
-    for file in ["assets/pi0_fast_droid_ricl/droid/norm_stats.json",
-                ]:
-        if not os.path.exists(file):
-            os.makedirs(file.split("/norm_stats.json")[0], exist_ok=True)
-            print(f'writing {file}')
-            json.dump(new_norm_stats, open(file, 'w'), indent=2)
+    if output_files is None:
+        output_files = ["assets/pi0_fast_droid_ricl/droid/norm_stats.json"]
+
+    for file in output_files:
+        os.makedirs(os.path.dirname(file), exist_ok=True)
+        print(f'writing {file}')
+        json.dump(new_norm_stats, open(file, 'w'), indent=2)
+
+
+def convert_existing_norm_stats_file(input_file, num_retrieved, output_file=None):
+    """Convert an existing norm_stats.json with plain keys to RICL-prefixed keys.
+
+    Use this when you already have norm_stats computed (e.g. from SFT training)
+    and want to convert them for RICL training/inference.
+    """
+    if output_file is None:
+        output_file = input_file
+
+    norm_stats = json.load(open(input_file, 'r'))
+    new_norm_stats = {"norm_stats": {}}
+    for key in norm_stats["norm_stats"]:
+        for i in range(num_retrieved):
+            new_norm_stats["norm_stats"][f"retrieved_{i}_{key}"] = norm_stats["norm_stats"][key]
+        new_norm_stats["norm_stats"][f"query_{key}"] = norm_stats["norm_stats"][key]
+
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    print(f'writing {output_file}')
+    json.dump(new_norm_stats, open(output_file, 'w'), indent=2)
+    print(f'keys: {list(new_norm_stats["norm_stats"].keys())}')
 
 
 if __name__ == "__main__":
     num_retrieved = 4 # consequnce is distances
     output_file_name = compute_and_save_simple_norm_stats_for_ricl(num_retrieved = num_retrieved)
-    convert_simple_norm_stats_to_retrieved_and_query_norm_stats(norm_stats_basic_file = output_file_name, num_retrieved = num_retrieved)
+    convert_simple_norm_stats_to_retrieved_and_query_norm_stats(
+        norm_stats_basic_file = output_file_name,
+        num_retrieved = num_retrieved,
+        output_files=[
+            "assets/pi0_fast_droid_ricl/droid/norm_stats.json",
+        ],
+    )

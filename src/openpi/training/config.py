@@ -257,6 +257,8 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
     For your own dataset, you can copy this class and modify the transforms to match your dataset based on the
     comments below.
     """
+    
+    extra_delta_transform: bool = False
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -303,11 +305,14 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
         # apply a separate delta conversion (that's why it's commented out). Choose whether to apply this
         # transform based on whether your dataset uses ``absolute`` or ``delta`` actions out of the box.
 
-        # delta_action_mask = _transforms.make_bool_mask(6, -1)
-        # data_transforms = data_transforms.push(
-        #     inputs=[_transforms.DeltaActions(delta_action_mask)],
-        #     outputs=[_transforms.AbsoluteActions(delta_action_mask)],
-        # )
+        # LIBERO already represents actions as deltas, but checkpoints trained with extra_delta_transform=True
+        # expect this transform to be applied at inference time (AbsoluteActions undoes the double-delta).
+        if self.extra_delta_transform:
+            delta_action_mask = _transforms.make_bool_mask(6, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
 
         # Model transforms include things like tokenizing the prompt and action targets
         # You do not need to change anything here for your own dataset.
@@ -391,6 +396,60 @@ class RiclDroidDataConfig(DataConfigFactory):
                 )
 
         # We return all data transforms for training and inference. No need to change anything here.
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+
+
+@dataclasses.dataclass(frozen=True)
+class RiclLiberoDataConfig(DataConfigFactory):
+    """Config for LIBERO RICL priming datasets."""
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: pi0_fast_ricl.Pi0FASTRiclConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[_transforms.IdentityTransform()],
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[
+                libero_policy.RiclLiberoInputs(
+                    action_dim=model_config.action_dim,
+                    num_retrieved_observations=model_config.num_retrieved_observations,
+                )
+            ],
+            outputs=[libero_policy.RiclLiberoOutputs()],
+        )
+
+        model_transforms = _transforms.Group(
+            inputs=[
+                _transforms.ResizeImagesRicl(224, 224, model_config.num_retrieved_observations),
+                _transforms.TokenizeFASTInputsRicl(
+                    _tokenizer.FASTTokenizerRicl(
+                        max_len=model_config.max_token_len,
+                        action_horizon=model_config.action_horizon,
+                        action_dim=model_config.action_dim,
+                    ),
+                    num_retrieved_observations=model_config.num_retrieved_observations,
+                ),
+            ],
+            outputs=[
+                _transforms.ExtractFASTActionsRicl(
+                    _tokenizer.FASTTokenizerRicl(
+                        max_len=model_config.max_token_len,
+                        action_horizon=model_config.action_horizon,
+                        action_dim=model_config.action_dim,
+                    ),
+                    action_horizon=model_config.action_horizon,
+                    action_dim=model_config.action_dim,
+                )
+            ],
+        )
+
         return dataclasses.replace(
             self.create_base_config(assets_dirs),
             repack_transforms=repack_transform,
@@ -516,6 +575,87 @@ _CONFIGS = [
             default_prompt="open the tupperware and put the food on the plate",
         ),
     ),
+
+    #
+    # RICL-Pi0-FAST-LIBERO configs.
+    #
+    TrainConfig(
+        name="pi0_fast_libero_ricl",
+        finetuning_collected_demos_dir="preprocessing/collected_demos_training",
+        model=pi0_fast_ricl.Pi0FASTRiclConfig(
+            action_dim=7,
+            action_horizon=10,
+            max_token_len=180,
+            num_retrieved_observations=4,
+            use_action_interpolation=True,
+            lamda=10.0,
+        ),
+        data=RiclLiberoDataConfig(
+            repo_id=None,
+            assets=AssetsConfig(asset_id="libero"),
+            base_config=DataConfig(prompt_from_task=False),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/mnt/data/vhoangth2/ckpts/openpi/checkpoints/pi0_fast_libero/finetune_pi0fast_libero_icl_job/14999/params"), # TODO: change this after SFT
+        num_train_steps=10_000,
+        batch_size=8,
+        freeze_filter=pi0_fast_ricl.Pi0FASTRiclConfig(
+            action_dim=7,
+            action_horizon=10,
+            max_token_len=180,
+            num_retrieved_observations=4,
+            use_action_interpolation=True,
+            lamda=10.0,
+        ).get_freeze_filter_with_frozen_img_encoder(),
+        ema_decay=None,
+        log_interval=1,
+        save_interval=5000,
+        keep_period=300,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=300, peak_lr=2.5e-5, decay_steps=3000, decay_lr=2.5e-6
+        ),
+        # wandb_enabled=False,
+    ),
+
+    TrainConfig(
+        name="pi0_fast_libero_ricl_low_mem",
+        finetuning_collected_demos_dir="preprocessing/collected_demos_training",
+        model=pi0_fast_ricl.Pi0FASTRiclConfig(
+            action_dim=7,
+            action_horizon=10,
+            max_token_len=180,
+            num_retrieved_observations=4,
+            use_action_interpolation=True,
+            lamda=10.0,
+            paligemma_variant="gemma_2b_lora",
+        ),
+        data=RiclLiberoDataConfig(
+            repo_id=None,
+            assets=AssetsConfig(asset_id="libero"),
+            base_config=DataConfig(prompt_from_task=False),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/mnt/data/vhoangth2/ckpts/openpi/checkpoints/pi0_fast_libero_low_mem_finetune/finetune_pi0fast_libero_lora_icl_job/14999/params"),
+        num_train_steps=10_000,
+        batch_size=16,
+        freeze_filter=pi0_fast_ricl.Pi0FASTRiclConfig(
+            action_dim=7,
+            action_horizon=10,
+            max_token_len=180,
+            num_retrieved_observations=4,
+            use_action_interpolation=True,
+            lamda=10.0,
+            paligemma_variant="gemma_2b_lora",
+        ).get_freeze_filter_with_frozen_img_encoder(),
+        ema_decay=None,
+        log_interval=1,
+        save_interval=300,
+        keep_period=300,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=300, peak_lr=2.5e-5, decay_steps=3000, decay_lr=2.5e-6
+        ),
+        wandb_enabled=False,
+    ),
+
+
     #
     # Inference DROID configs.
     #
@@ -660,7 +800,7 @@ _CONFIGS = [
         # you see many warnings being thrown during training.
         model=pi0_fast.Pi0FASTConfig(action_dim=7, action_horizon=10, max_token_len=180),
         data=LeRobotLiberoDataConfig(
-            repo_id="physical-intelligence/libero",
+            repo_id="ryanhoangt/libero-icl-finetune",
             base_config=DataConfig(
                 local_files_only=False,  # Set to True for local-only datasets.
                 prompt_from_task=True,
@@ -678,14 +818,15 @@ _CONFIGS = [
             action_dim=7, action_horizon=10, max_token_len=180, paligemma_variant="gemma_2b_lora"
         ),
         data=LeRobotLiberoDataConfig(
-            repo_id="physical-intelligence/libero",
+            repo_id="ryanhoangt/libero-icl-priming",
             base_config=DataConfig(
                 local_files_only=False,  # Set to True for local-only datasets.
                 prompt_from_task=True,
             ),
         ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_fast_base/params"),
-        num_train_steps=30_000,
+        weight_loader=weight_loaders.CheckpointWeightLoader("/mnt/data/vhoangth2/pretrained-weights/pi0_fast_base/params"),
+        num_train_steps=15_000,
+        wandb_enabled=False,
         # Again, make sure to match the model config above when extracting the freeze filter
         # that specifies which parameters should be frozen during LoRA finetuning.
         freeze_filter=pi0_fast.Pi0FASTConfig(

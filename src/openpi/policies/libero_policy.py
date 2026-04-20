@@ -115,3 +115,66 @@ class LiberoOutputs(transforms.DataTransformFn):
         # For Libero, we only return the first 7 actions (since the rest is padding).
         # For your own dataset, replace `7` with the action dimension of your dataset.
         return {"actions": np.asarray(data["actions"][:, :7])}
+
+
+@dataclasses.dataclass(frozen=True)
+class RiclLiberoInputs(transforms.DataTransformFn):
+    """Prepare LIBERO observations for RICL training/inference."""
+
+    action_dim: int
+    num_retrieved_observations: int
+    model_type: _model.ModelType = _model.ModelType.PI0_FAST
+
+    def __call__(self, data: dict) -> dict:
+        all_prefix = [f"retrieved_{i}_" for i in range(self.num_retrieved_observations)] + ["query_"]
+        inputs_dicts = []
+
+        for prefix in all_prefix:
+            base_image = _parse_image(data[f"{prefix}top_image"])
+            wrist_image = _parse_image(data[f"{prefix}wrist_image"])
+            # Image key order MUST match LiberoInputs (used for SFT) so that
+            # the SigLip positional slots are consistent across SFT → RICL:
+            #   pos 0 = base_0_rgb (base camera)
+            #   pos 1 = left_wrist_0_rgb (wrist camera)
+            #   pos 2 = right_wrist_0_rgb (zeros / unused)
+            # PI0_FAST does not mask padding images, so all masks are True.
+            inputs_dicts.append(
+                {
+                    f"{prefix}state": data[f"{prefix}state"],
+                    f"{prefix}image": {
+                        "base_0_rgb": base_image,
+                        "left_wrist_0_rgb": wrist_image,
+                        "right_wrist_0_rgb": np.zeros_like(base_image),
+                    },
+                    f"{prefix}image_mask": {
+                        "base_0_rgb": np.True_,
+                        "left_wrist_0_rgb": np.True_,
+                        "right_wrist_0_rgb": np.True_,
+                    },
+                }
+            )
+
+        inputs = {k: v for d in inputs_dicts for k, v in d.items()}
+
+        for prefix in all_prefix[:-1]:
+            inputs[f"{prefix}actions"] = data[f"{prefix}actions"]
+        if "query_actions" in data:
+            inputs["query_actions"] = data["query_actions"]
+
+        for prefix in all_prefix:
+            inputs[f"{prefix}prompt"] = data[f"{prefix}prompt"]
+
+        if "exp_lamda_distances" in data:
+            inputs["exp_lamda_distances"] = data["exp_lamda_distances"]
+        if "inference_time" in data:
+            inputs["inference_time"] = data["inference_time"]
+
+        return inputs
+
+
+@dataclasses.dataclass(frozen=True)
+class RiclLiberoOutputs(transforms.DataTransformFn):
+    def __call__(self, data: dict) -> dict:
+        actions = np.asarray(data["query_actions"])
+        return {"actions": actions, "query_actions": actions}
+

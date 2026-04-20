@@ -13,7 +13,7 @@ def create_idx_fol_mapping(ds_name):
 	mappings = {temp_name: defaultdict(list) if temp_name == 'groups_to_ep_idxs' else {} for temp_name in mapping_names}
 	
 	count = 100000 # count starts from 100k because droid has less than 100k episodes
-	groups = [f'{ds_name}/{dir}' for dir in os.listdir(ds_name)]
+	groups = [f'{ds_name}/{dir}' for dir in os.listdir(ds_name) if os.path.isdir(f'{ds_name}/{dir}')]
 	mappings['groups_to_ep_fols'] = {group: [f'{group}/{fol}' for fol in os.listdir(group)] for group in groups}
 	for group, ep_fols in mappings['groups_to_ep_fols'].items():
 		for ep_fol in ep_fols:

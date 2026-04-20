@@ -1,0 +1,8 @@
+services:
+  openpi_server:
+    command: >
+      /bin/bash -c "uv run scripts/serve_policy_ricl.py policy:checkpoint
+      --policy.config ${RICL_CONFIG}
+      --policy.dir ${RICL_CHECKPOINT}
+      --policy.demos_dir ${RICL_DEMOS}
+      --policy.max-distance-file ${RICL_MAX_DIST:-assets/max_distance.json}"
