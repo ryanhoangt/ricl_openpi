@@ -55,8 +55,7 @@ class Pi0FASTPerceiverRiclConfig(_model.BaseModelConfig):
     # retaining enough capacity for (visual context + state + action) information.
     num_latents: int = 32
 
-    # Keep True so that RiclLiberoDataset loads exp_lamda_distances, which this
-    # model uses for per-retrieval latent weighting (not for action interpolation).
+    # Keep True so that RiclLiberoDataset loads exp_lamda_distances into the batch.
     use_action_interpolation: bool = True
 
     @property
@@ -291,17 +290,7 @@ class Pi0FASTPerceiverRicl(_model.BaseModel):
         at.Bool[at.Array, "b n"],
         at.Int[at.Array, "b n"],
     ]:
-        """Compress all retrieved samples and return (latents, input_mask, ar_mask).
-
-        Latents for retrieved sample i are scaled by exp(-λ·dist_i), where dist_i
-        is the L2 distance of retrieved_i from retrieved_0 (the closest match,
-        always weight=1.0).  Farther retrievals contribute with smaller weight.
-        """
-        assert ricl_observation.exp_lamda_distances is not None, (
-            "exp_lamda_distances must be present. Ensure use_action_interpolation=True "
-            "in the model config so that RiclLiberoDataset loads distances."
-        )
-
+        """Compress all retrieved samples and return (latents, input_mask, ar_mask)."""
         retrieval_latent_parts = []
 
         for i in range(self.num_retrieved_observations):
@@ -311,11 +300,7 @@ class Pi0FASTPerceiverRicl(_model.BaseModel):
                 rng, ret_obs, train=train, image_keys=list(ret_obs.images.keys())
             )
             latents = self.embed_retrieved_sample(ret_obs)  # [B, K, D]
-
-            # Distance weight: exp_lamda_distances[:, i, :] gives exp(-λ·dist_i).
-            # retrieved_0 has dist=0 → weight=1.0; farther samples get smaller weights.
-            exp_dist = ricl_observation.exp_lamda_distances[:, i:i + 1, :]  # [B, 1, 1]
-            retrieval_latent_parts.append(latents * exp_dist)
+            retrieval_latent_parts.append(latents)
 
         retrieval_latents = jnp.concatenate(retrieval_latent_parts, axis=1)  # [B, N*K, D]
         batch_size, n_retrieval_tokens, _ = retrieval_latents.shape
