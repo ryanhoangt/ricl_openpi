@@ -41,6 +41,7 @@ class Pi0FASTTrajPerceiverConfig(_model.BaseModelConfig):
     paligemma_variant: _gemma.Variant = "gemma_2b"
 
     action_dim: int = 7
+    state_dim: int = 8
     action_horizon: int = 10
     max_token_len: int = 180
 
@@ -48,6 +49,8 @@ class Pi0FASTTrajPerceiverConfig(_model.BaseModelConfig):
     num_latents: int = 32
     # Reference trajectory is subsampled / padded to this length.
     max_traj_len: int = 300
+    # Mean-pooled DINOv2 ViT-B/14 embedding dim per camera (64 patches × 768 → pooled to 768).
+    traj_dino_emb_dim: int = 768
 
     # Kept for DataLoader routing compatibility — set True so distances are
     # loaded by the dataset if needed in future. Has no effect on this model.
@@ -129,9 +132,10 @@ class Pi0FASTTrajPerceiver(_model.BaseModel):
 
         self.PaliGemma = nnx.Dict(llm=llm, img=img)
 
-        # Projects trajectory state [B, T, state_dim] → [B, T, model_dim]
+        # Projects [top_dino_emb; wrist_dino_emb; state] → [B, T, model_dim]
+        traj_input_dim = config.traj_dino_emb_dim * 2 + config.state_dim
         traj_proj = nnx_bridge.ToNNX(nn.Dense(model_dim, use_bias=True))
-        traj_proj.lazy_init(jnp.zeros((1, 1, config.action_dim)), rngs=rngs)
+        traj_proj.lazy_init(jnp.zeros((1, 1, traj_input_dim)), rngs=rngs)
         self.traj_proj = traj_proj
 
         perceiver = nnx_bridge.ToNNX(
@@ -213,10 +217,14 @@ class Pi0FASTTrajPerceiver(_model.BaseModel):
     def _build_traj_prefix(
         self,
         traj_state: at.Float[at.Array, "b t s"],
+        traj_top_emb: at.Float[at.Array, "b t e"],
+        traj_wrist_emb: at.Float[at.Array, "b t e"],
         traj_mask: at.Bool[at.Array, "b t"],
         query_embed: at.Float[at.Array, "b d"],
     ) -> tuple[at.Float[at.Array, "b k d"], at.Bool[at.Array, "b k"], at.Int[at.Array, "b k"]]:
-        traj_tokens = self.traj_proj(traj_state)           # [B, T, D]
+        # Concatenate mean-pooled DINOv2 embeddings with proprioceptive state, then project.
+        traj_input = jnp.concatenate([traj_top_emb, traj_wrist_emb, traj_state], axis=-1)
+        traj_tokens = self.traj_proj(traj_input)           # [B, T, D]
         latents = self.perceiver(traj_tokens, query_embed, traj_mask=traj_mask)  # [B, K, D]
         batch_size = latents.shape[0]
         latent_mask = jnp.ones((batch_size, self.num_latents), dtype=jnp.bool_)
@@ -247,7 +255,8 @@ class Pi0FASTTrajPerceiver(_model.BaseModel):
         )
 
         traj_latents, latent_mask, latent_ar_mask = self._build_traj_prefix(
-            obs_dict["traj_state"], obs_dict["traj_mask"], query_embed
+            obs_dict["traj_state"], obs_dict["traj_top_emb"], obs_dict["traj_wrist_emb"],
+            obs_dict["traj_mask"], query_embed,
         )
 
         full_embeddings = jnp.concatenate([traj_latents, query_embeddings], axis=1)
@@ -298,7 +307,8 @@ class Pi0FASTTrajPerceiver(_model.BaseModel):
         )
 
         traj_latents, latent_mask, latent_ar_mask = self._build_traj_prefix(
-            obs_dict["traj_state"], obs_dict["traj_mask"], query_embed
+            obs_dict["traj_state"], obs_dict["traj_top_emb"], obs_dict["traj_wrist_emb"],
+            obs_dict["traj_mask"], query_embed,
         )
 
         prefix_embeddings = jnp.concatenate([traj_latents, query_embeddings], axis=1)

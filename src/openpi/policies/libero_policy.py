@@ -207,6 +207,8 @@ class TrajPerceiverLiberoInputs(transforms.DataTransformFn):
             },
             "query_prompt": data["query_prompt"],
             "traj_state": data["traj_state"],
+            "traj_top_emb": data["traj_top_emb"],
+            "traj_wrist_emb": data["traj_wrist_emb"],
             "traj_mask": data["traj_mask"],
         }
         if "query_actions" in data:
