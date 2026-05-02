@@ -825,7 +825,7 @@ _CONFIGS = [
             action_dim=7,
             action_horizon=10,
             max_token_len=180,
-        ).get_freeze_filter_with_frozen_img_encoder(),
+        ).get_freeze_filter_full_backbone(),
         ema_decay=None,
         log_interval=1,
         save_interval=5000,
@@ -833,7 +833,7 @@ _CONFIGS = [
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=500, peak_lr=1e-4, decay_steps=14500, decay_lr=1e-5
         ),
-        optimizer=MultiGroupAdamW(llm_lr_scale=0.05),
+        optimizer=_optimizer.AdamW(),
     ),
 
     #

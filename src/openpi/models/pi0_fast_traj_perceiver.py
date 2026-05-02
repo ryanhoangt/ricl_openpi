@@ -103,6 +103,10 @@ class Pi0FASTTrajPerceiverConfig(_model.BaseModelConfig):
             )
         return nnx.All(nnx_utils.PathRegex(".*img.*"), nnx.Not(nnx_utils.PathRegex(".*llm.*")))
 
+    def get_freeze_filter_full_backbone(self) -> nnx.filterlib.Filter:
+        """Freeze entire VLM (SigLIP + Gemma); only traj_proj and perceiver are trainable."""
+        return nnx.Any(nnx_utils.PathRegex(".*img.*"), nnx_utils.PathRegex(".*llm.*"))
+
 
 class Pi0FASTTrajPerceiver(_model.BaseModel):
     def __init__(self, config: Pi0FASTTrajPerceiverConfig, rngs: nnx.Rngs):
