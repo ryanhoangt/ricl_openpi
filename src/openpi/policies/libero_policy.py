@@ -178,3 +178,45 @@ class RiclLiberoOutputs(transforms.DataTransformFn):
         actions = np.asarray(data["query_actions"])
         return {"actions": actions, "query_actions": actions}
 
+
+@dataclasses.dataclass(frozen=True)
+class TrajPerceiverLiberoInputs(transforms.DataTransformFn):
+    """Prepare LIBERO observations for trajectory-perceiver training/inference.
+
+    Processes query_top_image / query_wrist_image into the standard image dict
+    format and passes traj_state / traj_mask through unchanged.
+    """
+
+    action_dim: int
+
+    def __call__(self, data: dict) -> dict:
+        base_image = _parse_image(data["query_top_image"])
+        wrist_image = _parse_image(data["query_wrist_image"])
+
+        inputs = {
+            "query_state": data["query_state"],
+            "query_image": {
+                "base_0_rgb": base_image,
+                "left_wrist_0_rgb": wrist_image,
+                "right_wrist_0_rgb": np.zeros_like(base_image),
+            },
+            "query_image_mask": {
+                "base_0_rgb": np.True_,
+                "left_wrist_0_rgb": np.True_,
+                "right_wrist_0_rgb": np.True_,
+            },
+            "query_prompt": data["query_prompt"],
+            "traj_state": data["traj_state"],
+            "traj_mask": data["traj_mask"],
+        }
+        if "query_actions" in data:
+            inputs["query_actions"] = data["query_actions"]
+        return inputs
+
+
+@dataclasses.dataclass(frozen=True)
+class TrajPerceiverLiberoOutputs(transforms.DataTransformFn):
+    def __call__(self, data: dict) -> dict:
+        actions = np.asarray(data["query_actions"])
+        return {"actions": actions, "query_actions": actions}
+

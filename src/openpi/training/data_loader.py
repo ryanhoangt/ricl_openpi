@@ -325,6 +325,90 @@ def _resolve_demo_path(base_dir: str, demo_path: str) -> str:
     return os.path.join(base_dir, demo_path)
 
 
+class TrajPerceiverLiberoDataset(Dataset):
+    """Dataset for trajectory-perceiver training.
+
+    Each sample is a (query_timestep, reference_trajectory) pair.  The
+    reference trajectory is the first episode of the same task group as the
+    query, subsampled to max_traj_len if longer, zero-padded if shorter.
+    """
+
+    def __init__(self, model_config, finetuning_collected_demos_dir: str | None):
+        self.action_horizon = model_config.action_horizon
+        self.max_traj_len = model_config.max_traj_len
+
+        outer_dir = (
+            "ricl_libero_preprocessing/collected_demos_training"
+            if finetuning_collected_demos_dir is None
+            else finetuning_collected_demos_dir
+        )
+        collected_demos_infos = {
+            k: json.load(open(f"{outer_dir}/{k}.json"))
+            for k in ["ep_idxs_to_fol", "fols_to_ep_idxs", "groups_to_ep_fols", "groups_to_ep_idxs"]
+        }
+
+        # Build (ep_idx, step_idx, task_group) index and task→ref_ep mapping.
+        all_query_indices = []   # list of (ep_idx, step_idx, group_name)
+        task_to_ref_ep_path = {}  # group_name → path to reference processed_demo.npz
+        all_ep_data_paths = {}   # ep_idx → path
+
+        for group_name, ep_fols in collected_demos_infos["groups_to_ep_fols"].items():
+            # First episode of this task is the reference.
+            ref_ep_fol = ep_fols[0]
+            ref_ep_path = os.path.join(_resolve_demo_path(outer_dir, ref_ep_fol), "processed_demo.npz")
+            task_to_ref_ep_path[group_name] = ref_ep_path
+
+            for ep_fol in ep_fols:
+                ep_idx = collected_demos_infos["fols_to_ep_idxs"][ep_fol]
+                ep_path = os.path.join(_resolve_demo_path(outer_dir, ep_fol), "processed_demo.npz")
+                all_ep_data_paths[ep_idx] = ep_path
+
+                ep_data = np.load(ep_path)
+                T = ep_data["state"].shape[0]
+                for step_idx in range(T):
+                    all_query_indices.append((ep_idx, step_idx, group_name))
+
+        self.all_query_indices = all_query_indices
+        self.task_to_ref_ep_path = task_to_ref_ep_path
+        self.all_ep_data_paths = all_ep_data_paths
+        logging.info(f"TrajPerceiverLiberoDataset: {len(all_query_indices)} query timesteps across {len(task_to_ref_ep_path)} tasks")
+
+    def __getitem__(self, index: SupportsIndex) -> dict:
+        ep_idx, step_idx, group_name = self.all_query_indices[index]
+
+        ep_data = np.load(self.all_ep_data_paths[ep_idx])
+        data = {
+            "query_top_image": ep_data["top_image"][step_idx],
+            "query_wrist_image": ep_data["wrist_image"][step_idx],
+            "query_state": ep_data["state"][step_idx],
+            "query_actions": get_action_chunk_from_actions(ep_data["actions"], step_idx, self.action_horizon),
+            "query_prompt": ep_data["prompt"].item(),
+        }
+
+        # Load reference trajectory state.
+        ref_data = np.load(self.task_to_ref_ep_path[group_name])
+        traj_state = ref_data["state"].astype(np.float32)  # [T, state_dim]
+        T = traj_state.shape[0]
+
+        if T > self.max_traj_len:
+            indices = np.linspace(0, T - 1, self.max_traj_len, dtype=int)
+            traj_state = traj_state[indices]
+            traj_mask = np.ones(self.max_traj_len, dtype=bool)
+        else:
+            pad = self.max_traj_len - T
+            traj_state = np.concatenate(
+                [traj_state, np.zeros((pad, traj_state.shape[1]), dtype=np.float32)], axis=0
+            )
+            traj_mask = np.array([True] * T + [False] * pad, dtype=bool)
+
+        data["traj_state"] = traj_state   # [max_traj_len, state_dim]
+        data["traj_mask"] = traj_mask     # [max_traj_len]
+        return data
+
+    def __len__(self) -> int:
+        return len(self.all_query_indices)
+
+
 class RiclLiberoDataset(Dataset):
     def __init__(self, model_config: _pi0_fast_ricl.Pi0FASTRiclConfig, finetuning_collected_demos_dir: str | None):
         num_retrieved_observations = model_config.num_retrieved_observations
@@ -516,7 +600,9 @@ def create_data_loader(
     """
     data_config = config.data.create(config.assets_dirs, config.model)
 
-    if "ricl" in config.name:
+    if "traj_perceiver" in config.name and "libero" in config.name:
+        dataset = TrajPerceiverLiberoDataset(config.model, config.finetuning_collected_demos_dir)
+    elif "ricl" in config.name:
         if "libero" in config.name:
             dataset = RiclLiberoDataset(config.model, config.finetuning_collected_demos_dir)
         else:
@@ -547,7 +633,13 @@ def create_data_loader(
 
         def __iter__(self):
             for batch in self._data_loader:
-                if "ricl" in config.name:
+                if "traj_perceiver" in config.name and "libero" in config.name:
+                    # Convert images to float32 [-1, 1] if not already done by transforms.
+                    for key in batch["query_image"]:
+                        if batch["query_image"][key].dtype == jnp.uint8:
+                            batch["query_image"][key] = batch["query_image"][key].astype(jnp.float32) / 255.0 * 2.0 - 1.0
+                    yield batch, batch["query_actions"]
+                elif "ricl" in config.name:
                     yield _model.RiclObservation.from_dict(batch, config.model.num_retrieved_observations), batch["query_actions"]
                 else:
                     yield _model.Observation.from_dict(batch), batch["actions"]

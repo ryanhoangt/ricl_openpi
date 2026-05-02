@@ -149,8 +149,11 @@ def init_train_state(
     return train_state, state_sharding
 
 
-def create_decode_indices(config: _config.TrainConfig) -> at.Int[at.Array, "decode_len"]:
-    # create the indices to decide which tokens to decode: i.e. only those belonging to each retrieved/query "prompt, state, action" prompt and not the images
+def create_decode_indices(config: _config.TrainConfig) -> jax.Array | None:
+    # Only RICL models (with multiple retrieved observations) need explicit decode indices
+    # to skip image tokens in the loss. Models without retrieval handle loss masking internally.
+    if not hasattr(config.model, 'num_retrieved_observations'):
+        return None
     image_token_len = 256*2 # number of image tokens times number of images
     prompt_token_len = config.model.max_token_len # max token len for each retrieved/query "prompt, state, action" prompt
     total_token_len = image_token_len + prompt_token_len
@@ -167,16 +170,13 @@ def train_step(
     config: _config.TrainConfig,
     rng: at.KeyArrayLike,
     state: training_utils.TrainState,
-    batch: tuple[_model.RiclObservation, _model.Actions],
-    decode_indices: at.Int[at.Array, "decode_len"],
+    batch: tuple[Any, _model.Actions],
+    decode_indices: jax.Array | None = None,
 ) -> tuple[training_utils.TrainState, dict[str, at.Array]]:
     model = nnx.merge(state.model_def, state.params)
     model.train()
 
-    @at.typecheck
-    def loss_fn(
-        model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.RiclObservation, actions: _model.Actions
-    ):
+    def loss_fn(model, rng, observation, actions):
         chunked_loss = model.compute_loss(rng, observation, actions, train=True, decode_indices=decode_indices)
         return jnp.mean(chunked_loss)
 

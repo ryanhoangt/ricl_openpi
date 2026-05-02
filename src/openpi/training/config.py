@@ -18,6 +18,7 @@ import openpi.models.pi0 as pi0
 import openpi.models.pi0_fast as pi0_fast
 import openpi.models.pi0_fast_perceiver_ricl as pi0_fast_perceiver_ricl
 import openpi.models.pi0_fast_ricl as pi0_fast_ricl
+import openpi.models.pi0_fast_traj_perceiver as pi0_fast_traj_perceiver
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
@@ -408,6 +409,53 @@ class RiclDroidDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class TrajPerceiverLiberoDataConfig(DataConfigFactory):
+    """Config for trajectory-perceiver LIBERO datasets."""
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: pi0_fast_traj_perceiver.Pi0FASTTrajPerceiverConfig) -> DataConfig:
+        repack_transform = _transforms.Group(inputs=[_transforms.IdentityTransform()])
+
+        data_transforms = _transforms.Group(
+            inputs=[libero_policy.TrajPerceiverLiberoInputs(action_dim=model_config.action_dim)],
+            outputs=[libero_policy.TrajPerceiverLiberoOutputs()],
+        )
+
+        model_transforms = _transforms.Group(
+            inputs=[
+                # num_retrieved_observations=0 → only resizes/tokenizes query
+                _transforms.ResizeImagesRicl(224, 224, 0),
+                _transforms.TokenizeFASTInputsRicl(
+                    _tokenizer.FASTTokenizerRicl(
+                        max_len=model_config.max_token_len,
+                        action_horizon=model_config.action_horizon,
+                        action_dim=model_config.action_dim,
+                    ),
+                    num_retrieved_observations=0,
+                ),
+            ],
+            outputs=[
+                _transforms.ExtractFASTActionsRicl(
+                    _tokenizer.FASTTokenizerRicl(
+                        max_len=model_config.max_token_len,
+                        action_horizon=model_config.action_horizon,
+                        action_dim=model_config.action_dim,
+                    ),
+                    action_horizon=model_config.action_horizon,
+                    action_dim=model_config.action_dim,
+                )
+            ],
+        )
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class RiclLiberoDataConfig(DataConfigFactory):
     """Config for LIBERO RICL priming datasets."""
 
@@ -750,6 +798,43 @@ _CONFIGS = [
         optimizer=MultiGroupAdamW(llm_lr_scale=0.1),
     ),
 
+
+    TrainConfig(
+        name="pi0_fast_libero_traj_perceiver",
+        finetuning_collected_demos_dir="ricl_libero_preprocessing/collected_demos_training",
+        model=pi0_fast_traj_perceiver.Pi0FASTTrajPerceiverConfig(
+            action_dim=7,
+            action_horizon=10,
+            max_token_len=180,
+            num_latents=32,
+            max_traj_len=300,
+        ),
+        data=TrajPerceiverLiberoDataConfig(
+            repo_id=None,
+            assets=AssetsConfig(asset_id="libero"),
+            base_config=DataConfig(prompt_from_task=False),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            # Load from a pi0_fast_libero SFT checkpoint; perceiver + traj_proj are randomly init'd.
+            params_path="s3://openpi-assets/checkpoints/pi0_fast_libero/params",
+            missing_regex=".*lora.*|.*perceiver.*|.*traj_proj.*",
+        ),
+        num_train_steps=15_000,
+        batch_size=8,
+        freeze_filter=pi0_fast_traj_perceiver.Pi0FASTTrajPerceiverConfig(
+            action_dim=7,
+            action_horizon=10,
+            max_token_len=180,
+        ).get_freeze_filter_with_frozen_img_encoder(),
+        ema_decay=None,
+        log_interval=1,
+        save_interval=5000,
+        keep_period=300,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500, peak_lr=1e-4, decay_steps=14500, decay_lr=1e-5
+        ),
+        optimizer=MultiGroupAdamW(llm_lr_scale=0.05),
+    ),
 
     #
     # Inference DROID configs.

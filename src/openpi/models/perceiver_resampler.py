@@ -92,3 +92,43 @@ class PerceiverResampler(nn.Module):
             latents = latents + FeedForward(dim=self.dim, mult=self.ff_mult)(latents)
 
         return nn.LayerNorm()(latents)
+
+
+class TrajPerceiverResampler(nn.Module):
+    """Perceiver resampler conditioned on a query observation embedding.
+
+    Unlike PerceiverResampler (fixed learned latents), the num_latents initial
+    queries are seeded from the current observation embedding so that cross-
+    attention over the reference trajectory is query-conditioned: the model
+    extracts what is relevant to *this* timestep from the trajectory.
+    """
+
+    dim: int
+    depth: int = 6
+    dim_head: int = 64
+    heads: int = 8
+    num_latents: int = 32
+    ff_mult: int = 4
+
+    @nn.compact
+    def __call__(
+        self,
+        traj_tokens: jax.Array,
+        query_embed: jax.Array,
+        traj_mask: jax.Array | None = None,
+    ) -> jax.Array:
+        # query_embed: [B, D] — aggregated query observation vector
+        # traj_tokens: [B, T, D] — reference trajectory token sequence
+        # Seed num_latents slots from query_embed; FFN layers differentiate them.
+        latents = jnp.broadcast_to(
+            query_embed[:, None, :], (query_embed.shape[0], self.num_latents, self.dim)
+        )
+        latents = jnp.array(latents)  # make writeable copy
+
+        for _ in range(self.depth):
+            latents = latents + PerceiverAttention(dim=self.dim, dim_head=self.dim_head, heads=self.heads)(
+                traj_tokens, latents, mask=traj_mask
+            )
+            latents = latents + FeedForward(dim=self.dim, mult=self.ff_mult)(latents)
+
+        return nn.LayerNorm()(latents)
