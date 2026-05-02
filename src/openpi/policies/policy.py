@@ -283,6 +283,105 @@ class RiclPolicy(BasePolicy):
         return self._metadata
 
 
+class TrajPerceiverPolicy(BasePolicy):
+    def __init__(
+        self,
+        model,
+        *,
+        rng: at.KeyArrayLike | None = None,
+        transforms: Sequence[_transforms.DataTransformFn] = (),
+        output_transforms: Sequence[_transforms.DataTransformFn] = (),
+        sample_kwargs: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+        demos_dir: str | None = None,
+        max_traj_len: int = 300,
+    ):
+        self._sample_actions = nnx_utils.module_jit(model.sample_actions)
+        self._input_transform = _transforms.compose(transforms)
+        self._output_transform = _transforms.compose(output_transforms)
+        self._rng = rng or jax.random.key(0)
+        self._sample_kwargs = sample_kwargs or {}
+        self._metadata = metadata or {}
+        self._max_traj_len = max_traj_len
+
+        logger.info(f"Loading reference trajectory from {demos_dir}...")
+        folders = sorted(f for f in os.listdir(demos_dir) if os.path.isdir(f"{demos_dir}/{f}"))
+        if not folders:
+            raise ValueError(f"No demo subdirectories found in {demos_dir}")
+        ref_npz = np.load(f"{demos_dir}/{folders[0]}/processed_demo.npz")
+        self._traj_state, self._traj_top_emb, self._traj_wrist_emb, self._traj_mask = (
+            self._preprocess_traj(ref_npz, max_traj_len)
+        )
+        logger.info(f"Loaded reference trajectory with {self._traj_mask.sum()} valid frames (max={max_traj_len})")
+
+    @staticmethod
+    def _preprocess_traj(ref_npz, max_traj_len: int):
+        traj_state = ref_npz["state"].astype(np.float32)                          # [T, state_dim]
+        traj_top_emb = ref_npz["top_image_embeddings"].astype(np.float32)         # [T, 49152]
+        traj_wrist_emb = ref_npz["wrist_image_embeddings"].astype(np.float32)     # [T, 49152]
+        T = traj_state.shape[0]
+
+        if T > max_traj_len:
+            idx = np.linspace(0, T - 1, max_traj_len, dtype=int)
+            traj_state = traj_state[idx]
+            traj_top_emb = traj_top_emb[idx]
+            traj_wrist_emb = traj_wrist_emb[idx]
+            traj_mask = np.ones(max_traj_len, dtype=bool)
+        else:
+            pad = max_traj_len - T
+            traj_state = np.concatenate([traj_state, np.zeros((pad, traj_state.shape[1]), dtype=np.float32)], axis=0)
+            traj_top_emb = np.concatenate([traj_top_emb, np.zeros((pad, 49152), dtype=np.float32)], axis=0)
+            traj_wrist_emb = np.concatenate([traj_wrist_emb, np.zeros((pad, 49152), dtype=np.float32)], axis=0)
+            traj_mask = np.array([True] * T + [False] * pad, dtype=bool)
+
+        traj_top_emb = traj_top_emb.reshape(max_traj_len, 64, 768).mean(axis=1)
+        traj_wrist_emb = traj_wrist_emb.reshape(max_traj_len, 64, 768).mean(axis=1)
+        return traj_state, traj_top_emb, traj_wrist_emb, traj_mask
+
+    def _ensure_query_keys(self, obs: dict) -> dict:
+        if "query_top_image" not in obs:
+            if "observation/image" in obs:
+                obs["query_top_image"] = obs["observation/image"]
+            elif "top_image" in obs:
+                obs["query_top_image"] = obs["top_image"]
+        if "query_wrist_image" not in obs:
+            if "observation/wrist_image" in obs:
+                obs["query_wrist_image"] = obs["observation/wrist_image"]
+            elif "wrist_image" in obs:
+                obs["query_wrist_image"] = obs["wrist_image"]
+        if "query_state" not in obs:
+            if "observation/state" in obs:
+                obs["query_state"] = obs["observation/state"]
+            elif "state" in obs:
+                obs["query_state"] = obs["state"]
+        if "query_prompt" not in obs and "prompt" in obs:
+            obs["query_prompt"] = obs["prompt"]
+        return obs
+
+    @override
+    def infer(self, obs: dict) -> dict:  # type: ignore[misc]
+        obs = self._ensure_query_keys(obs)
+        obs["traj_state"] = self._traj_state
+        obs["traj_top_emb"] = self._traj_top_emb
+        obs["traj_wrist_emb"] = self._traj_wrist_emb
+        obs["traj_mask"] = self._traj_mask
+
+        inputs = jax.tree.map(lambda x: x, obs)
+        inputs = self._input_transform(inputs)
+        inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
+
+        self._rng, sample_rng = jax.random.split(self._rng)
+        actions = self._sample_actions(sample_rng, inputs, **self._sample_kwargs)
+
+        outputs = {"query_actions": actions}
+        outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
+        return self._output_transform(outputs)
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        return self._metadata
+
+
 class PolicyRecorder(_base_policy.BasePolicy):
     """Records the policy's behavior to disk."""
 

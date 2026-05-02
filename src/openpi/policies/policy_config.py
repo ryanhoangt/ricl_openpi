@@ -131,3 +131,47 @@ def create_trained_ricl_policy(
         action_horizon=train_config.model.action_horizon,
         max_distance_file=max_distance_file,
     )
+
+
+def create_trained_traj_perceiver_policy(
+    train_config: _config.TrainConfig,
+    checkpoint_dir: pathlib.Path | str,
+    demos_dir: str,
+    norm_stats: dict[str, transforms.NormStats] | None = None,
+) -> _policy.TrajPerceiverPolicy:
+    """Create a traj perceiver policy from a trained checkpoint.
+
+    Args:
+        train_config: The training config.
+        checkpoint_dir: The directory to load the model from.
+        demos_dir: Directory containing demo subdirectories, each with processed_demo.npz.
+                   The first demo will be used as the fixed reference trajectory.
+        norm_stats: Norm stats to use. If not provided, loaded from the checkpoint directory.
+    """
+    checkpoint_dir = download.maybe_download(str(checkpoint_dir))
+
+    logging.info("Loading model...")
+    model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
+
+    data_config = train_config.data.create(train_config.assets_dirs, train_config.model)
+    if norm_stats is None:
+        if data_config.asset_id is None:
+            raise ValueError("Asset id is required to load norm stats.")
+        norm_stats = _checkpoints.load_norm_stats(checkpoint_dir / "assets", data_config.asset_id)
+
+    return _policy.TrajPerceiverPolicy(
+        model,
+        transforms=[
+            *data_config.data_transforms.inputs,
+            transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
+            *data_config.model_transforms.inputs,
+        ],
+        output_transforms=[
+            *data_config.model_transforms.outputs,
+            transforms.Unnormalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
+            *data_config.data_transforms.outputs,
+        ],
+        metadata=train_config.policy_metadata,
+        demos_dir=demos_dir,
+        max_traj_len=train_config.model.max_traj_len,
+    )
