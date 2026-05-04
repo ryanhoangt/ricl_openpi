@@ -132,11 +132,13 @@ class TrajPerceiverResampler(nn.Module):
     ) -> jax.Array | tuple[jax.Array, jax.Array]:
         # query_embed: [B, D] — aggregated query observation vector
         # traj_tokens: [B, T, D] — reference trajectory token sequence
-        # Seed num_latents slots from query_embed; FFN layers differentiate them.
-        latents = jnp.broadcast_to(
-            query_embed[:, None, :], (query_embed.shape[0], self.num_latents, self.dim)
+        # Seed num_latents slots from query_embed + per-latent learned offsets.
+        # The offsets break symmetry so each slot can specialize; without them
+        # all latents start identical and remain identical throughout all layers.
+        latent_offsets = self.param(
+            "latent_offsets", nn.initializers.normal(stddev=0.02), (self.num_latents, self.dim)
         )
-        latents = jnp.array(latents)  # make writeable copy
+        latents = query_embed[:, None, :] + latent_offsets[None, :, :]
 
         all_attn_weights = []
         for _ in range(self.depth):
