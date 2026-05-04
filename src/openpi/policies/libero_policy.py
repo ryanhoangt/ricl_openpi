@@ -206,6 +206,7 @@ class TrajPerceiverLiberoInputs(transforms.DataTransformFn):
                 "right_wrist_0_rgb": np.True_,
             },
             "query_prompt": data["query_prompt"],
+            "query_dino_top_emb": data["query_dino_top_emb"],
             "traj_state": data["traj_state"],
             "traj_top_emb": data["traj_top_emb"],
             "traj_wrist_emb": data["traj_wrist_emb"],

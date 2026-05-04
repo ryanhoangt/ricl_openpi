@@ -314,6 +314,9 @@ class TrajPerceiverPolicy(BasePolicy):
         )
         logger.info(f"Loaded reference trajectory with {self._traj_mask.sum()} valid frames (max={max_traj_len})")
 
+        logger.info("Loading DINOv2 for query embedding...")
+        self._dinov2 = load_dinov2()
+
     @staticmethod
     def _preprocess_traj(ref_npz, max_traj_len: int):
         traj_state = ref_npz["state"].astype(np.float32)                          # [T, state_dim]
@@ -365,6 +368,9 @@ class TrajPerceiverPolicy(BasePolicy):
         obs["traj_top_emb"] = self._traj_top_emb
         obs["traj_wrist_emb"] = self._traj_wrist_emb
         obs["traj_mask"] = self._traj_mask
+        # Compute DINOv2 query embedding (same space as trajectory K/V)
+        raw_emb = embed(obs["query_top_image"], self._dinov2)  # [1, 49152]
+        obs["query_dino_top_emb"] = raw_emb.reshape(64, 768).mean(axis=0).astype(np.float32)
 
         inputs = jax.tree.map(lambda x: x, obs)
         inputs = self._input_transform(inputs)

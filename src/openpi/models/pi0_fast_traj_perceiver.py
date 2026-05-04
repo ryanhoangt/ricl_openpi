@@ -136,11 +136,17 @@ class Pi0FASTTrajPerceiver(_model.BaseModel):
 
         self.PaliGemma = nnx.Dict(llm=llm, img=img)
 
-        # Projects [top_dino_emb; wrist_dino_emb; state] → [B, T, model_dim]
+        # Projects [top_dino_emb; wrist_dino_emb; state] → [B, T, model_dim] for K/V
         traj_input_dim = config.traj_dino_emb_dim * 2 + config.state_dim
         traj_proj = nnx_bridge.ToNNX(nn.Dense(model_dim, use_bias=True))
         traj_proj.lazy_init(jnp.zeros((1, 1, traj_input_dim)), rngs=rngs)
         self.traj_proj = traj_proj
+
+        # Projects query top-image DINOv2 emb → model_dim for perceiver Q seed.
+        # Using DINOv2 (same space as K) rather than SigLIP for Q/K alignment.
+        query_dino_proj = nnx_bridge.ToNNX(nn.Dense(model_dim, use_bias=True))
+        query_dino_proj.lazy_init(jnp.zeros((1, config.traj_dino_emb_dim)), rngs=rngs)
+        self.query_dino_proj = query_dino_proj
 
         perceiver = nnx_bridge.ToNNX(
             TrajPerceiverResampler(
@@ -228,11 +234,13 @@ class Pi0FASTTrajPerceiver(_model.BaseModel):
         traj_top_emb: at.Float[at.Array, "b t e"],
         traj_wrist_emb: at.Float[at.Array, "b t e"],
         traj_mask: at.Bool[at.Array, "b t"],
-        query_embed: at.Float[at.Array, "b d"],
+        query_dino_top_emb: at.Float[at.Array, "b e"],
     ) -> tuple[at.Float[at.Array, "b k d"], at.Bool[at.Array, "b k"], at.Int[at.Array, "b k"]]:
-        # Concatenate mean-pooled DINOv2 embeddings with proprioceptive state, then project.
+        # K/V: project trajectory (DINOv2 top + wrist + state) → model_dim
         traj_input = jnp.concatenate([traj_top_emb, traj_wrist_emb, traj_state], axis=-1)
-        traj_tokens = self.traj_proj(traj_input)           # [B, T, D]
+        traj_tokens = self.traj_proj(traj_input)                         # [B, T, D]
+        # Q seed: project query DINOv2 top emb → model_dim (same space as K)
+        query_embed = self.query_dino_proj(query_dino_top_emb)           # [B, D]
         latents = self.perceiver(traj_tokens, query_embed, traj_mask=traj_mask)  # [B, K, D]
         batch_size = latents.shape[0]
         latent_mask = jnp.ones((batch_size, self.num_latents), dtype=jnp.bool_)
@@ -264,7 +272,7 @@ class Pi0FASTTrajPerceiver(_model.BaseModel):
 
         traj_latents, latent_mask, latent_ar_mask = self._build_traj_prefix(
             obs_dict["traj_state"], obs_dict["traj_top_emb"], obs_dict["traj_wrist_emb"],
-            obs_dict["traj_mask"], query_embed,
+            obs_dict["traj_mask"], obs_dict["query_dino_top_emb"],
         )
 
         full_embeddings = jnp.concatenate([traj_latents, query_embeddings], axis=1)
@@ -316,7 +324,7 @@ class Pi0FASTTrajPerceiver(_model.BaseModel):
 
         traj_latents, latent_mask, latent_ar_mask = self._build_traj_prefix(
             obs_dict["traj_state"], obs_dict["traj_top_emb"], obs_dict["traj_wrist_emb"],
-            obs_dict["traj_mask"], query_embed,
+            obs_dict["traj_mask"], obs_dict["query_dino_top_emb"],
         )
 
         prefix_embeddings = jnp.concatenate([traj_latents, query_embeddings], axis=1)
@@ -394,16 +402,11 @@ class Pi0FASTTrajPerceiver(_model.BaseModel):
         Returns avg-over-layers, avg-over-heads attention: [B, num_latents, T]
         where T = max_traj_len (padded positions have near-zero weight due to masking).
         """
-        query_obs = self._build_obs_from_dict(obs_dict)
-        query_obs = _model.preprocess_observation_prefix_postfix(
-            None, query_obs, train=False, image_keys=list(query_obs.images.keys())
-        )
-        _, _, _, query_embed = self.embed_inputs_and_query_embed(query_obs)
-
         traj_input = jnp.concatenate(
             [obs_dict["traj_top_emb"], obs_dict["traj_wrist_emb"], obs_dict["traj_state"]], axis=-1
         )
         traj_tokens = self.traj_proj(traj_input)
+        query_embed = self.query_dino_proj(obs_dict["query_dino_top_emb"])
         _, attn_weights = self.perceiver(
             traj_tokens, query_embed, traj_mask=obs_dict["traj_mask"], return_attn_weights=True
         )

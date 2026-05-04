@@ -377,10 +377,13 @@ class TrajPerceiverLiberoDataset(Dataset):
         ep_idx, step_idx, group_name = self.all_query_indices[index]
 
         ep_data = np.load(self.all_ep_data_paths[ep_idx])
+        # Mean-pool DINOv2 64PATCHES → 768-dim for query frame (used as perceiver Q seed)
+        query_dino_top_emb = ep_data["top_image_embeddings"][step_idx].reshape(64, 768).mean(axis=0).astype(np.float32)
         data = {
             "query_top_image": ep_data["top_image"][step_idx],
             "query_wrist_image": ep_data["wrist_image"][step_idx],
             "query_state": ep_data["state"][step_idx],
+            "query_dino_top_emb": query_dino_top_emb,
             "query_actions": get_action_chunk_from_actions(ep_data["actions"], step_idx, self.action_horizon),
             "query_prompt": ep_data["prompt"].item(),
         }
