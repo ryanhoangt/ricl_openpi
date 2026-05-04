@@ -387,3 +387,24 @@ class Pi0FASTTrajPerceiver(_model.BaseModel):
             cond, step, (last_logit, output_tokens, kv_cache, False, 0)
         )
         return output_tokens
+
+    def get_perceiver_attn_weights(self, obs_dict: dict) -> jnp.ndarray:
+        """Return perceiver attention weights for diagnostics.
+
+        Returns avg-over-layers, avg-over-heads attention: [B, num_latents, T]
+        where T = max_traj_len (padded positions have near-zero weight due to masking).
+        """
+        query_obs = self._build_obs_from_dict(obs_dict)
+        query_obs = _model.preprocess_observation_prefix_postfix(
+            None, query_obs, train=False, image_keys=list(query_obs.images.keys())
+        )
+        _, _, _, query_embed = self.embed_inputs_and_query_embed(query_obs)
+
+        traj_input = jnp.concatenate(
+            [obs_dict["traj_top_emb"], obs_dict["traj_wrist_emb"], obs_dict["traj_state"]], axis=-1
+        )
+        traj_tokens = self.traj_proj(traj_input)
+        _, attn_weights = self.perceiver(
+            traj_tokens, query_embed, traj_mask=obs_dict["traj_mask"], return_attn_weights=True
+        )
+        return attn_weights  # [B, num_latents, T]

@@ -31,7 +31,13 @@ class PerceiverAttention(nn.Module):
     heads: int = 8
 
     @nn.compact
-    def __call__(self, tokens: jax.Array, latents: jax.Array, mask: jax.Array | None = None) -> jax.Array:
+    def __call__(
+        self,
+        tokens: jax.Array,
+        latents: jax.Array,
+        mask: jax.Array | None = None,
+        return_weights: bool = False,
+    ) -> jax.Array | tuple[jax.Array, jax.Array]:
         tokens = nn.LayerNorm()(tokens)
         latents = nn.LayerNorm()(latents)
 
@@ -69,7 +75,13 @@ class PerceiverAttention(nn.Module):
         attn = jax.nn.softmax(sim, axis=-1)
         out = jnp.einsum("bhij,bhjd->bhid", attn, v)
         out = jnp.transpose(out, (0, 2, 1, 3)).reshape(batch_size, num_latents, inner_dim)
-        return to_out(out)
+        out = to_out(out)
+
+        if return_weights:
+            # Return only the trajectory-token slice: [B, heads, num_latents, T]
+            num_traj = tokens.shape[1]
+            return out, attn[:, :, :, :num_traj]
+        return out
 
 
 class PerceiverResampler(nn.Module):
@@ -116,7 +128,8 @@ class TrajPerceiverResampler(nn.Module):
         traj_tokens: jax.Array,
         query_embed: jax.Array,
         traj_mask: jax.Array | None = None,
-    ) -> jax.Array:
+        return_attn_weights: bool = False,
+    ) -> jax.Array | tuple[jax.Array, jax.Array]:
         # query_embed: [B, D] — aggregated query observation vector
         # traj_tokens: [B, T, D] — reference trajectory token sequence
         # Seed num_latents slots from query_embed; FFN layers differentiate them.
@@ -125,10 +138,22 @@ class TrajPerceiverResampler(nn.Module):
         )
         latents = jnp.array(latents)  # make writeable copy
 
+        all_attn_weights = []
         for _ in range(self.depth):
-            latents = latents + PerceiverAttention(dim=self.dim, dim_head=self.dim_head, heads=self.heads)(
-                traj_tokens, latents, mask=traj_mask
+            attn_out = PerceiverAttention(dim=self.dim, dim_head=self.dim_head, heads=self.heads)(
+                traj_tokens, latents, mask=traj_mask, return_weights=return_attn_weights
             )
+            if return_attn_weights:
+                attn_out, weights = attn_out  # weights: [B, heads, num_latents, T]
+                all_attn_weights.append(weights)
+            latents = latents + attn_out
             latents = latents + FeedForward(dim=self.dim, mult=self.ff_mult)(latents)
 
-        return nn.LayerNorm()(latents)
+        latents = nn.LayerNorm()(latents)
+
+        if return_attn_weights:
+            # Stack over layers, average over heads -> [B, num_latents, T]
+            stacked = jnp.stack(all_attn_weights, axis=0)  # [depth, B, heads, num_latents, T]
+            avg_weights = stacked.mean(axis=(0, 2))          # [B, num_latents, T]
+            return latents, avg_weights
+        return latents
