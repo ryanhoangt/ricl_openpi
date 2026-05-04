@@ -207,8 +207,12 @@ class Pi0FASTTrajPerceiver(_model.BaseModel):
         )
 
     def _build_obs_from_dict(self, obs_dict: dict) -> _model.ObservationPrefixPostfix:
+        images = {
+            k: (v.astype(jnp.float32) / 255.0 * 2.0 - 1.0) if v.dtype == jnp.uint8 else v
+            for k, v in obs_dict["query_image"].items()
+        }
         return _model.ObservationPrefixPostfix(
-            images=obs_dict["query_image"],
+            images=images,
             image_masks=obs_dict["query_image_mask"],
             state=obs_dict["query_state"],
             tokenized_prompt_prefix=obs_dict.get("query_tokenized_prompt_prefix"),

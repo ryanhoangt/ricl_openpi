@@ -185,14 +185,14 @@ class FASTTokenizerRicl:
         # always pad prefix tokens to 1/2 the max length
         assert self._max_len % 2 == 0, "max_len must be divisible by 2 to pad prefix tokens to 1/2 the max length and postfix tokens to the rest"
         if len(prefix_tokens) < self._max_len // 2:
-            prefix_padding = [False] * (self._max_len // 2 - len(prefix_tokens))
+            prefix_padding = [0] * (self._max_len // 2 - len(prefix_tokens))
         else:
             raise ValueError(f"Prefix tokens length ({len(prefix_tokens)}) exceeds 1/2 the max length ({self._max_len // 2})! Increase the `max_token_len` in your model config.")
         # pad postfix tokens if not dont_pad
         if dont_pad:
             postfix_padding = []
         else:
-            postfix_padding = [False] * (self._max_len - len(prefix_tokens) - len(prefix_padding) - len(postfix_tokens))            
+            postfix_padding = [0] * (self._max_len - len(prefix_tokens) - len(prefix_padding) - len(postfix_tokens))            
 
         # Create output token sequence & masks
         # AR mask is 0 on prefix (bidirectional attention) and 1 on postfix (causal attention to all previous tokens)
