@@ -168,7 +168,7 @@ def compute_saliency(model, ricl_obs: _model.RiclObservation) -> tuple[np.ndarra
 
     grads = jax.grad(action_nll)(all_embeddings)
     # Input × gradient saliency, L2 over embedding dim → [T]
-    saliency = np.asarray(jnp.sqrt(jnp.sum((grads * all_embeddings) ** 2, axis=-1))[0])
+    saliency = np.asarray(jnp.sqrt(jnp.sum((grads * all_embeddings) ** 2, axis=-1))[0].astype(jnp.float32))
 
     # --- Build token role map for annotation ---
     token_roles = np.full(seq_len, "pad", dtype=object)
