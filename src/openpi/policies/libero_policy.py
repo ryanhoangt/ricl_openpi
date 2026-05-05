@@ -124,14 +124,21 @@ class RiclLiberoInputs(transforms.DataTransformFn):
     action_dim: int
     num_retrieved_observations: int
     model_type: _model.ModelType = _model.ModelType.PI0_FAST
+    # When False, retrieved observation images are zeroed out and masked so the
+    # LLM only conditions on retrieved state/action tokens, not images.
+    use_retrieved_images: bool = True
 
     def __call__(self, data: dict) -> dict:
         all_prefix = [f"retrieved_{i}_" for i in range(self.num_retrieved_observations)] + ["query_"]
         inputs_dicts = []
 
         for prefix in all_prefix:
+            is_retrieved = prefix != "query_"
+            drop_images = is_retrieved and not self.use_retrieved_images
+
             base_image = _parse_image(data[f"{prefix}top_image"])
             wrist_image = _parse_image(data[f"{prefix}wrist_image"])
+            zeros = np.zeros_like(base_image)
             # Image key order MUST match LiberoInputs (used for SFT) so that
             # the SigLip positional slots are consistent across SFT → RICL:
             #   pos 0 = base_0_rgb (base camera)
@@ -142,13 +149,13 @@ class RiclLiberoInputs(transforms.DataTransformFn):
                 {
                     f"{prefix}state": data[f"{prefix}state"],
                     f"{prefix}image": {
-                        "base_0_rgb": base_image,
-                        "left_wrist_0_rgb": wrist_image,
-                        "right_wrist_0_rgb": np.zeros_like(base_image),
+                        "base_0_rgb": zeros if drop_images else base_image,
+                        "left_wrist_0_rgb": zeros if drop_images else wrist_image,
+                        "right_wrist_0_rgb": zeros,
                     },
                     f"{prefix}image_mask": {
-                        "base_0_rgb": np.True_,
-                        "left_wrist_0_rgb": np.True_,
+                        "base_0_rgb": np.False_ if drop_images else np.True_,
+                        "left_wrist_0_rgb": np.False_ if drop_images else np.True_,
                         "right_wrist_0_rgb": np.True_,
                     },
                 }
