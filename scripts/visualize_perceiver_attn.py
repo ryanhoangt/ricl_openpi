@@ -47,16 +47,13 @@ def build_obs_dict(policy: TrajPerceiverPolicy, query_npz, step_idx: int) -> dic
     train_config = _config.get_config("pi0_fast_libero_traj_perceiver")
     data_config = train_config.data.create(train_config.assets_dirs, train_config.model)
 
-    query_dino_top_emb = query_npz["top_image_embeddings"][step_idx].reshape(64, 768).mean(axis=0).astype(np.float32)
     obs = {
         "query_top_image": query_npz["top_image"][step_idx],
         "query_wrist_image": query_npz["wrist_image"][step_idx],
         "query_state": query_npz["state"][step_idx],
         "query_prompt": query_npz["prompt"].item(),
-        "query_dino_top_emb": query_dino_top_emb,
         "traj_state": policy._traj_state,
-        "traj_top_emb": policy._traj_top_emb,
-        "traj_wrist_emb": policy._traj_wrist_emb,
+        "traj_actions": policy._traj_actions,
         "traj_mask": policy._traj_mask,
     }
 

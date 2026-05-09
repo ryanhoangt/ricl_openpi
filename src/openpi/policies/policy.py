@@ -309,37 +309,29 @@ class TrajPerceiverPolicy(BasePolicy):
         if not folders:
             raise ValueError(f"No demo subdirectories found in {demos_dir}")
         ref_npz = np.load(f"{demos_dir}/{folders[0]}/processed_demo.npz")
-        self._traj_state, self._traj_top_emb, self._traj_wrist_emb, self._traj_mask = (
+        self._traj_state, self._traj_actions, self._traj_mask = (
             self._preprocess_traj(ref_npz, max_traj_len)
         )
         logger.info(f"Loaded reference trajectory with {self._traj_mask.sum()} valid frames (max={max_traj_len})")
 
-        logger.info("Loading DINOv2 for query embedding...")
-        self._dinov2 = load_dinov2()
-
     @staticmethod
     def _preprocess_traj(ref_npz, max_traj_len: int):
-        traj_state = ref_npz["state"].astype(np.float32)                          # [T, state_dim]
-        traj_top_emb = ref_npz["top_image_embeddings"].astype(np.float32)         # [T, 49152]
-        traj_wrist_emb = ref_npz["wrist_image_embeddings"].astype(np.float32)     # [T, 49152]
+        traj_state = ref_npz["state"].astype(np.float32)     # [T, state_dim]
+        traj_actions = ref_npz["actions"].astype(np.float32) # [T, action_dim]
         T = traj_state.shape[0]
 
         if T > max_traj_len:
             idx = np.linspace(0, T - 1, max_traj_len, dtype=int)
             traj_state = traj_state[idx]
-            traj_top_emb = traj_top_emb[idx]
-            traj_wrist_emb = traj_wrist_emb[idx]
+            traj_actions = traj_actions[idx]
             traj_mask = np.ones(max_traj_len, dtype=bool)
         else:
             pad = max_traj_len - T
             traj_state = np.concatenate([traj_state, np.zeros((pad, traj_state.shape[1]), dtype=np.float32)], axis=0)
-            traj_top_emb = np.concatenate([traj_top_emb, np.zeros((pad, 49152), dtype=np.float32)], axis=0)
-            traj_wrist_emb = np.concatenate([traj_wrist_emb, np.zeros((pad, 49152), dtype=np.float32)], axis=0)
+            traj_actions = np.concatenate([traj_actions, np.zeros((pad, traj_actions.shape[1]), dtype=np.float32)], axis=0)
             traj_mask = np.array([True] * T + [False] * pad, dtype=bool)
 
-        traj_top_emb = traj_top_emb.reshape(max_traj_len, 64, 768).mean(axis=1)
-        traj_wrist_emb = traj_wrist_emb.reshape(max_traj_len, 64, 768).mean(axis=1)
-        return traj_state, traj_top_emb, traj_wrist_emb, traj_mask
+        return traj_state, traj_actions, traj_mask
 
     def _ensure_query_keys(self, obs: dict) -> dict:
         if "query_top_image" not in obs:
@@ -365,12 +357,8 @@ class TrajPerceiverPolicy(BasePolicy):
     def infer(self, obs: dict) -> dict:  # type: ignore[misc]
         obs = self._ensure_query_keys(obs)
         obs["traj_state"] = self._traj_state
-        obs["traj_top_emb"] = self._traj_top_emb
-        obs["traj_wrist_emb"] = self._traj_wrist_emb
+        obs["traj_actions"] = self._traj_actions
         obs["traj_mask"] = self._traj_mask
-        # Compute DINOv2 query embedding (same space as trajectory K/V)
-        raw_emb = embed(obs["query_top_image"], self._dinov2)  # [1, 49152]
-        obs["query_dino_top_emb"] = raw_emb.reshape(64, 768).mean(axis=0).astype(np.float32)
 
         inputs = jax.tree.map(lambda x: x, obs)
         inputs = self._input_transform(inputs)

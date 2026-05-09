@@ -857,7 +857,7 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader(
             # Load from a pi0_fast_libero SFT checkpoint; perceiver + traj_proj are randomly init'd.
             params_path="s3://openpi-assets/checkpoints/pi0_fast_libero/params",
-            missing_regex=".*lora.*|.*perceiver.*|.*traj_proj.*|.*query_dino_proj.*",
+            missing_regex=".*lora.*|.*perceiver.*|.*traj_proj.*|.*query_state_proj.*",
         ),
         num_train_steps=15_000,
         batch_size=8,

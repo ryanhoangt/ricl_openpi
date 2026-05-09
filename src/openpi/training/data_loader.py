@@ -377,51 +377,38 @@ class TrajPerceiverLiberoDataset(Dataset):
         ep_idx, step_idx, group_name = self.all_query_indices[index]
 
         ep_data = np.load(self.all_ep_data_paths[ep_idx])
-        # Mean-pool DINOv2 64PATCHES → 768-dim for query frame (used as perceiver Q seed)
-        query_dino_top_emb = ep_data["top_image_embeddings"][step_idx].reshape(64, 768).mean(axis=0).astype(np.float32)
         data = {
             "query_top_image": ep_data["top_image"][step_idx],
             "query_wrist_image": ep_data["wrist_image"][step_idx],
             "query_state": ep_data["state"][step_idx],
-            "query_dino_top_emb": query_dino_top_emb,
             "query_actions": get_action_chunk_from_actions(ep_data["actions"], step_idx, self.action_horizon),
             "query_prompt": ep_data["prompt"].item(),
         }
 
-        # Load reference trajectory: state + DINOv2 embeddings (64PATCHES, vitb14).
+        # Load reference trajectory: state + actions only (no DINOv2 embeddings needed).
         ref_data = np.load(self.task_to_ref_ep_path[group_name])
-        traj_state = ref_data["state"].astype(np.float32)                          # [T, state_dim]
-        traj_top_emb = ref_data["top_image_embeddings"].astype(np.float32)         # [T, 49152]
-        traj_wrist_emb = ref_data["wrist_image_embeddings"].astype(np.float32)     # [T, 49152]
+        traj_state = ref_data["state"].astype(np.float32)    # [T, state_dim]
+        traj_actions = ref_data["actions"].astype(np.float32) # [T, action_dim]
         T = traj_state.shape[0]
 
         if T > self.max_traj_len:
             indices = np.linspace(0, T - 1, self.max_traj_len, dtype=int)
             traj_state = traj_state[indices]
-            traj_top_emb = traj_top_emb[indices]
-            traj_wrist_emb = traj_wrist_emb[indices]
+            traj_actions = traj_actions[indices]
             traj_mask = np.ones(self.max_traj_len, dtype=bool)
         else:
             pad = self.max_traj_len - T
             traj_state = np.concatenate(
                 [traj_state, np.zeros((pad, traj_state.shape[1]), dtype=np.float32)], axis=0
             )
-            traj_top_emb = np.concatenate(
-                [traj_top_emb, np.zeros((pad, 49152), dtype=np.float32)], axis=0
-            )
-            traj_wrist_emb = np.concatenate(
-                [traj_wrist_emb, np.zeros((pad, 49152), dtype=np.float32)], axis=0
+            traj_actions = np.concatenate(
+                [traj_actions, np.zeros((pad, traj_actions.shape[1]), dtype=np.float32)], axis=0
             )
             traj_mask = np.array([True] * T + [False] * pad, dtype=bool)
 
-        # Mean-pool DINOv2 64PATCHES (64 × 768 = 49152) → 768-dim per frame per camera.
-        traj_top_emb = traj_top_emb.reshape(self.max_traj_len, 64, 768).mean(axis=1)    # [max_traj_len, 768]
-        traj_wrist_emb = traj_wrist_emb.reshape(self.max_traj_len, 64, 768).mean(axis=1)
-
-        data["traj_state"] = traj_state         # [max_traj_len, state_dim]
-        data["traj_top_emb"] = traj_top_emb     # [max_traj_len, 768]
-        data["traj_wrist_emb"] = traj_wrist_emb # [max_traj_len, 768]
-        data["traj_mask"] = traj_mask           # [max_traj_len]
+        data["traj_state"] = traj_state    # [max_traj_len, state_dim]
+        data["traj_actions"] = traj_actions # [max_traj_len, action_dim]
+        data["traj_mask"] = traj_mask      # [max_traj_len]
         return data
 
     def __len__(self) -> int:
