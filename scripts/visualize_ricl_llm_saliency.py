@@ -26,6 +26,19 @@ import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 
+# Paper-friendly default style.
+plt.rcParams.update({
+    "font.family": "DejaVu Sans",
+    "font.size": 9,
+    "axes.titlesize": 10,
+    "axes.labelsize": 9,
+    "xtick.labelsize": 8,
+    "ytick.labelsize": 8,
+    "legend.fontsize": 8,
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+})
+
 import openpi.models.model as _model
 from openpi.training import config as _config
 from openpi.policies.policy_config import create_trained_policy
@@ -187,16 +200,14 @@ def compute_saliency(model, ricl_obs: _model.RiclObservation) -> tuple[np.ndarra
     return saliency, block_ranges, token_roles
 
 
-def _bin_saliency(saliency: np.ndarray, token_roles: np.ndarray, n_bins: int = 400):
-    """Average-pool saliency along the position axis to ``n_bins`` bins.
-
-    Each bin gets a saliency value per role (img/ctx/action). Bins are
-    contiguous chunks of the position axis so block boundaries stay readable.
-    """
-    T = len(saliency)
-    edges = np.linspace(0, T, n_bins + 1, dtype=int)
-    bin_centers = (edges[:-1] + edges[1:]) / 2.0
-
+def _bin_saliency_per_block(saliency: np.ndarray, token_roles: np.ndarray,
+                             bstart: int, bend: int, n_bins: int):
+    """Bin saliency within a single block. Returns bin centers (in global
+    coordinates) and per-role mean values."""
+    block_len = bend - bstart
+    n_bins = min(n_bins, block_len)
+    edges = np.linspace(bstart, bend, n_bins + 1, dtype=int)
+    centers = (edges[:-1] + edges[1:]) / 2.0
     per_role = {"img": np.full(n_bins, np.nan), "ctx": np.full(n_bins, np.nan), "action": np.full(n_bins, np.nan)}
     for b in range(n_bins):
         sl = slice(edges[b], edges[b + 1])
@@ -206,7 +217,7 @@ def _bin_saliency(saliency: np.ndarray, token_roles: np.ndarray, n_bins: int = 4
             mask = np.array([r.endswith(f"_{role}") for r in roles_in_bin])
             if mask.any():
                 per_role[role][b] = sal_in_bin[mask].mean()
-    return bin_centers, per_role
+    return centers, per_role
 
 
 def plot_saliency_per_position(
@@ -215,38 +226,48 @@ def plot_saliency_per_position(
     block_ranges: list,
     num_retrieved: int,
     out_path: pathlib.Path,
-    n_bins: int = 400,
+    bins_per_block: int = 80,
 ):
-    """Compact per-position view (binned along token axis)."""
+    """Compact per-position view (binned within each block separately so lines
+    never connect across block boundaries)."""
     fig, ax = plt.subplots(figsize=(7.5, 3.0))
 
-    block_colors = plt.cm.tab10(np.linspace(0, 1, num_retrieved + 1))
-    for idx, (bstart, bend, _, _) in enumerate(block_ranges):
-        ax.axvspan(bstart, bend, alpha=0.07, color=block_colors[idx])
+    role_styles = [
+        ("img", "#1f77b4", "image"),
+        ("action", "#d62728", "action"),
+        ("ctx", "#2ca02c", "state/prompt"),
+    ]
 
-    bin_centers, per_role = _bin_saliency(saliency, token_roles, n_bins=n_bins)
-    for role, color, label in [("img", "steelblue", "image"),
-                                ("action", "tomato", "action"),
-                                ("ctx", "seagreen", "state/prompt")]:
-        y = per_role[role]
-        valid = ~np.isnan(y)
-        if valid.any():
-            ax.plot(bin_centers[valid], y[valid], color=color, label=label, linewidth=1.0)
+    # Plot once per (block, role). Use the legend label only on the first
+    # block so the legend has one entry per role.
+    seen_labels = set()
+    for idx, (bstart, bend, is_query, _) in enumerate(block_ranges):
+        centers, per_role = _bin_saliency_per_block(saliency, token_roles, bstart, bend, bins_per_block)
+        for role, color, label in role_styles:
+            y = per_role[role]
+            valid = ~np.isnan(y)
+            if not valid.any():
+                continue
+            legend_label = label if label not in seen_labels else None
+            ax.plot(centers[valid], y[valid], color=color, linewidth=1.0,
+                    label=legend_label)
+            seen_labels.add(label)
 
-    # Block boundary lines + labels
+    # Block boundary verticals + top labels (set after plotting so ylim is known).
+    ax.set_xlim(block_ranges[0][0], block_ranges[-1][1])
+    ax.margins(y=0.15)
+    y_top = ax.get_ylim()[1]
     for idx, (bstart, bend, is_query, _) in enumerate(block_ranges):
         if idx > 0:
             ax.axvline(bstart, color="gray", linewidth=0.4, linestyle="--")
         mid = (bstart + bend) / 2.0
-        label = "query" if is_query else f"ret_{idx}"
-        ax.text(mid, ax.get_ylim()[1] if ax.get_ylim()[1] > 0 else 1.0, label,
-                ha="center", va="bottom", fontsize=7, transform=ax.transData)
+        block_label = "query" if is_query else f"ret_{idx}"
+        ax.text(mid, y_top, block_label, ha="center", va="bottom", fontsize=8)
 
-    ax.set_xlabel("Token position (binned)")
+    ax.set_xlabel("Token position")
     ax.set_ylabel("Input×Grad saliency")
     ax.set_title("RICL LLM input saliency over token positions")
-    ax.legend(loc="upper left", fontsize=8)
-    ax.margins(x=0)
+    ax.legend(loc="upper left", frameon=False)
 
     plt.tight_layout()
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
