@@ -187,73 +187,113 @@ def compute_saliency(model, ricl_obs: _model.RiclObservation) -> tuple[np.ndarra
     return saliency, block_ranges, token_roles
 
 
-def plot_saliency(
+def _bin_saliency(saliency: np.ndarray, token_roles: np.ndarray, n_bins: int = 400):
+    """Average-pool saliency along the position axis to ``n_bins`` bins.
+
+    Each bin gets a saliency value per role (img/ctx/action). Bins are
+    contiguous chunks of the position axis so block boundaries stay readable.
+    """
+    T = len(saliency)
+    edges = np.linspace(0, T, n_bins + 1, dtype=int)
+    bin_centers = (edges[:-1] + edges[1:]) / 2.0
+
+    per_role = {"img": np.full(n_bins, np.nan), "ctx": np.full(n_bins, np.nan), "action": np.full(n_bins, np.nan)}
+    for b in range(n_bins):
+        sl = slice(edges[b], edges[b + 1])
+        roles_in_bin = token_roles[sl]
+        sal_in_bin = saliency[sl]
+        for role in per_role:
+            mask = np.array([r.endswith(f"_{role}") for r in roles_in_bin])
+            if mask.any():
+                per_role[role][b] = sal_in_bin[mask].mean()
+    return bin_centers, per_role
+
+
+def plot_saliency_per_position(
+    saliency: np.ndarray,
+    token_roles: np.ndarray,
+    block_ranges: list,
+    num_retrieved: int,
+    out_path: pathlib.Path,
+    n_bins: int = 400,
+):
+    """Compact per-position view (binned along token axis)."""
+    fig, ax = plt.subplots(figsize=(7.5, 3.0))
+
+    block_colors = plt.cm.tab10(np.linspace(0, 1, num_retrieved + 1))
+    for idx, (bstart, bend, _, _) in enumerate(block_ranges):
+        ax.axvspan(bstart, bend, alpha=0.07, color=block_colors[idx])
+
+    bin_centers, per_role = _bin_saliency(saliency, token_roles, n_bins=n_bins)
+    for role, color, label in [("img", "steelblue", "image"),
+                                ("action", "tomato", "action"),
+                                ("ctx", "seagreen", "state/prompt")]:
+        y = per_role[role]
+        valid = ~np.isnan(y)
+        if valid.any():
+            ax.plot(bin_centers[valid], y[valid], color=color, label=label, linewidth=1.0)
+
+    # Block boundary lines + labels
+    for idx, (bstart, bend, is_query, _) in enumerate(block_ranges):
+        if idx > 0:
+            ax.axvline(bstart, color="gray", linewidth=0.4, linestyle="--")
+        mid = (bstart + bend) / 2.0
+        label = "query" if is_query else f"ret_{idx}"
+        ax.text(mid, ax.get_ylim()[1] if ax.get_ylim()[1] > 0 else 1.0, label,
+                ha="center", va="bottom", fontsize=7, transform=ax.transData)
+
+    ax.set_xlabel("Token position (binned)")
+    ax.set_ylabel("Input×Grad saliency")
+    ax.set_title("RICL LLM input saliency over token positions")
+    ax.legend(loc="upper left", fontsize=8)
+    ax.margins(x=0)
+
+    plt.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved {out_path}")
+
+
+def plot_saliency_means(
     saliency: np.ndarray,
     token_roles: np.ndarray,
     block_ranges: list,
     num_retrieved: int,
     out_path: pathlib.Path,
 ):
-    fig, (ax_sal, ax_mean) = plt.subplots(2, 1, figsize=(18, 7), gridspec_kw={"height_ratios": [3, 1]})
-
-    cmap_img = plt.cm.Blues
-    cmap_ctx = plt.cm.Greens
-    cmap_act = plt.cm.Reds
-    block_colors = plt.cm.tab10(np.linspace(0, 1, num_retrieved + 1))
-
-    # Background shading per block
-    for idx, (bstart, bend, is_query, _) in enumerate(block_ranges):
-        color = block_colors[idx]
-        ax_sal.axvspan(bstart, bend, alpha=0.07, color=color)
-        ax_mean.axvspan(bstart, bend, alpha=0.07, color=color)
-
-    T = len(saliency)
-    xs = np.arange(T)
-
-    # Coloured scatter: img=blue, action=red, ctx=green
-    for role_suffix, color, label in [("_img", "steelblue", "image"), ("_action", "tomato", "action tokens"), ("_ctx", "seagreen", "state/prompt")]:
-        mask = np.array([r.endswith(role_suffix) for r in token_roles])
-        if mask.any():
-            ax_sal.scatter(xs[mask], saliency[mask], s=1.5, color=color, alpha=0.7, label=label)
-
-    ax_sal.set_ylabel("Input×Grad saliency")
-    ax_sal.set_title("RICL LLM input saliency — which tokens influence action generation")
-    ax_sal.legend(loc="upper left", markerscale=5)
-
-    # Block-average saliency bar chart
+    """Bar chart of mean saliency per (block, role)."""
     means, labels, colors = [], [], []
     for idx, (bstart, bend, is_query, _) in enumerate(block_ranges):
         prefix = "query" if is_query else f"ret_{idx}"
         img_end = bstart + IMG_TOKENS_PER_BLOCK
-        # image mean
         means.append(float(saliency[bstart:img_end].mean()))
         labels.append(f"{prefix}\nimg")
         colors.append("steelblue")
-        # ctx mean
         ctx_mask = np.array([r == f"{prefix}_ctx" for r in token_roles])
         if ctx_mask.any():
             means.append(float(saliency[ctx_mask].mean()))
             labels.append(f"{prefix}\nctx")
             colors.append("seagreen")
-        # action mean
         act_mask = np.array([r == f"{prefix}_action" for r in token_roles])
         if act_mask.any():
             means.append(float(saliency[act_mask].mean()))
             labels.append(f"{prefix}\naction")
             colors.append("tomato")
 
-    ax_mean.bar(range(len(means)), means, color=colors)
-    ax_mean.set_xticks(range(len(means)))
-    ax_mean.set_xticklabels(labels, fontsize=7)
-    ax_mean.set_ylabel("Mean saliency")
-    ax_mean.set_title("Mean saliency per token role per block")
+    fig, ax = plt.subplots(figsize=(7.5, 3.2))
+    bars = ax.bar(range(len(means)), means, color=colors)
+    ax.set_xticks(range(len(means)))
+    ax.set_xticklabels(labels, fontsize=8)
+    ax.set_ylabel("Mean Input×Grad saliency")
+    ax.set_title("Mean saliency per (block, role)")
 
-    # Block boundary lines
-    for _, (bstart, _, _, _) in enumerate(block_ranges[1:]):
-        ax_sal.axvline(bstart, color="gray", linewidth=0.5, linestyle="--")
+    # Annotate values
+    for bar, val in zip(bars, means):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                f"{val:.3f}", ha="center", va="bottom", fontsize=6.5)
 
     plt.tight_layout()
-    fig.savefig(out_path, dpi=120)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved {out_path}")
 
@@ -303,8 +343,10 @@ def main():
     print(f"  All retrieved ctx:    {saliency[ret_ctx_mask].mean():.4f}")
     print("\n  Higher saliency = LLM relies on these tokens more for action generation.")
 
-    plot_saliency(saliency, token_roles, block_ranges, num_retrieved,
-                  out_path=out_dir / "ricl_saliency.png")
+    plot_saliency_per_position(saliency, token_roles, block_ranges, num_retrieved,
+                                out_path=out_dir / "ricl_saliency_positions.png")
+    plot_saliency_means(saliency, token_roles, block_ranges, num_retrieved,
+                        out_path=out_dir / "ricl_saliency_means.png")
 
 
 if __name__ == "__main__":
