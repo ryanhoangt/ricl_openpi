@@ -266,7 +266,7 @@ def plot_saliency_per_position(
 
     ax.set_xlabel("Token position")
     ax.set_ylabel("Input×Grad saliency")
-    ax.set_title("RICL LLM input saliency over token positions")
+    ax.set_title("RICL LLM input saliency over token positions", pad=18)
     ax.legend(loc="upper left", frameon=False)
 
     plt.tight_layout()
