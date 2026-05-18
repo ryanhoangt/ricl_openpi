@@ -431,8 +431,11 @@ class TrajPerceiverLiberoDataset(Dataset):
 class RiclLiberoDataset(Dataset):
     def __init__(self, model_config: _pi0_fast_ricl.Pi0FASTRiclConfig, finetuning_collected_demos_dir: str | None):
         num_retrieved_observations = model_config.num_retrieved_observations
+        ricl_step_offset = int(getattr(model_config, "ricl_step_offset", 0))
         knn_k = 100
         assert num_retrieved_observations <= knn_k
+        # When ricl_step_offset > 0 we need a fallback pool larger than num_retrieved_observations.
+        pool_size = num_retrieved_observations if ricl_step_offset == 0 else min(2 * num_retrieved_observations, knn_k)
 
         outer_dir = (
             "ricl_libero_preprocessing/collected_demos_training"
@@ -450,35 +453,37 @@ class RiclLiberoDataset(Dataset):
                 ep_path = _resolve_demo_path(outer_dir, ep_fol)
                 indices_files.append(os.path.join(ep_path, "indices_and_distances.npz"))
 
-        all_retrieved_indices = []
+        all_pool_indices = []
         all_query_indices = []
-        all_distances = []
+        all_pool_distances = []
 
         for file_path in indices_files:
             indices_and_dists = np.load(file_path)
             query_indices = indices_and_dists["query_indices"]
-            retrieved_indices = indices_and_dists["retrieved_indices"][:, :num_retrieved_observations, :]
-            distances = np.concatenate(
+            # Pool of candidates from the precomputed top-knn_k list. Distances row layout in the
+            # precomputed file is [d(NN_0→NN_0)=0, d(NN_1→NN_0), ..., d(NN_{knn_k-1}→NN_0), d(query→NN_0)].
+            pool_indices = indices_and_dists["retrieved_indices"][:, :pool_size, :]
+            pool_distances = np.concatenate(
                 (
-                    indices_and_dists["distances"][:, :num_retrieved_observations],
+                    indices_and_dists["distances"][:, :pool_size],
                     indices_and_dists["distances"][:, -1:],
                 ),
                 axis=1,
             )
-            all_retrieved_indices.append(retrieved_indices)
+            all_pool_indices.append(pool_indices)
             all_query_indices.append(query_indices)
-            all_distances.append(distances)
+            all_pool_distances.append(pool_distances)
 
-        all_retrieved_indices = np.concatenate(all_retrieved_indices, axis=0)
+        all_pool_indices = np.concatenate(all_pool_indices, axis=0)
         all_query_indices = np.concatenate(all_query_indices, axis=0)
-        all_distances = np.concatenate(all_distances, axis=0)
-        len_dataset = all_retrieved_indices.shape[0]
+        all_pool_distances = np.concatenate(all_pool_distances, axis=0)
+        len_dataset = all_pool_indices.shape[0]
 
-        assert all_retrieved_indices.shape == (len_dataset, num_retrieved_observations, 2)
+        assert all_pool_indices.shape == (len_dataset, pool_size, 2)
         assert all_query_indices.shape == (len_dataset, 2)
-        assert all_distances.shape == (len_dataset, num_retrieved_observations + 1)
+        assert all_pool_distances.shape == (len_dataset, pool_size + 1)
 
-        max_dist_value = float(np.max(all_distances)) if len(all_distances) else 1.0
+        max_dist_value = float(np.max(all_pool_distances)) if len(all_pool_distances) else 1.0
         if max_dist_value == 0:
             max_dist_value = 1.0
         logging.info(
@@ -491,9 +496,9 @@ class RiclLiberoDataset(Dataset):
             json.dump({"distances": {"max": max_dist_value}}, f, indent=2)
         logging.info(f"Saved max_distance to {max_dist_file}")
 
-        all_distances = (all_distances / max_dist_value).astype(np.float32)
+        all_pool_distances = (all_pool_distances / max_dist_value).astype(np.float32)
 
-        all_ep_idxs = list(np.unique(all_retrieved_indices[:, :, 0])) + list(np.unique(all_query_indices[:, 0]))
+        all_ep_idxs = list(np.unique(all_pool_indices[:, :, 0])) + list(np.unique(all_query_indices[:, 0]))
         all_ep_data_paths = {
             ep_idx: os.path.join(
                 _resolve_demo_path(outer_dir, collected_demos_infos["ep_idxs_to_fol"][str(ep_idx)]),
@@ -501,6 +506,67 @@ class RiclLiberoDataset(Dataset):
             )
             for ep_idx in all_ep_idxs
         }
+
+        if ricl_step_offset == 0:
+            # Original behavior: top-k NN slots with precomputed distances.
+            all_retrieved_indices = all_pool_indices[:, :num_retrieved_observations, :]
+            all_distances = np.concatenate(
+                (all_pool_distances[:, :num_retrieved_observations], all_pool_distances[:, -1:]),
+                axis=1,
+            )
+        else:
+            # Offset scheme: slot 0 = top-1 NN at its step; slot j>=1 = same NN at step + j*offset,
+            # falling back to the next unused pool entry on overflow. Distances measured to slot 0
+            # (the anchor). For fallback slots we reuse the precomputed pool distance; for offset
+            # slots we compute the embedding distance on the fly. We iterate by nn0_ep so each
+            # demo's top_image_embeddings is loaded at most once (bounds peak memory).
+            logging.info(
+                f"RiclLiberoDataset: ricl_step_offset={ricl_step_offset} active; "
+                f"pool_size={pool_size}, recomputing slots and distances"
+            )
+            offset_slots = np.zeros((len_dataset, num_retrieved_observations, 2), dtype=np.int32)
+            offset_distances = np.zeros((len_dataset, num_retrieved_observations + 1), dtype=np.float32)
+
+            samples_by_nn0_ep: dict[int, list[int]] = {}
+            for i in range(len_dataset):
+                samples_by_nn0_ep.setdefault(int(all_pool_indices[i, 0, 0]), []).append(i)
+
+            for nn0_ep, sample_ids in samples_by_nn0_ep.items():
+                emb_arr = np.load(all_ep_data_paths[nn0_ep])["top_image_embeddings"]
+                nn0_traj_len = int(emb_arr.shape[0])
+                for i in sample_ids:
+                    nn0_step = int(all_pool_indices[i, 0, 1])
+                    first_emb = emb_arr[nn0_step]
+                    next_fallback = 1
+                    for j in range(num_retrieved_observations):
+                        cand_step = nn0_step + j * ricl_step_offset
+                        if cand_step < nn0_traj_len:
+                            offset_slots[i, j, 0] = nn0_ep
+                            offset_slots[i, j, 1] = cand_step
+                            if j == 0:
+                                offset_distances[i, j] = 0.0
+                            else:
+                                d_raw = float(np.linalg.norm(emb_arr[cand_step] - first_emb))
+                                d_clipped = min(max(d_raw, 0.0), max_dist_value)
+                                offset_distances[i, j] = d_clipped / max_dist_value
+                        else:
+                            if next_fallback < pool_size:
+                                offset_slots[i, j, 0] = int(all_pool_indices[i, next_fallback, 0])
+                                offset_slots[i, j, 1] = int(all_pool_indices[i, next_fallback, 1])
+                                offset_distances[i, j] = all_pool_distances[i, next_fallback]
+                                next_fallback += 1
+                            else:
+                                offset_slots[i, j] = offset_slots[i, j - 1] if j > 0 else np.array([nn0_ep, nn0_step], dtype=np.int32)
+                                offset_distances[i, j] = offset_distances[i, j - 1] if j > 0 else 0.0
+                    offset_distances[i, -1] = all_pool_distances[i, -1]  # query → nn0, precomputed
+                del emb_arr  # free per-demo embeddings before loading the next
+
+            all_retrieved_indices = offset_slots
+            all_distances = offset_distances
+
+        # Episode paths may need to be re-derived if the slot set differs from the pool slice
+        # (offset mode can pull additional episodes via fallback). The pool-based derivation
+        # above is already a superset, so it's safe.
 
         self.len_dataset = len_dataset
         self.all_ep_data_paths = all_ep_data_paths
@@ -510,6 +576,7 @@ class RiclLiberoDataset(Dataset):
         self.use_action_interpolation = model_config.use_action_interpolation
         self.lamda = model_config.lamda
         self.action_horizon = model_config.action_horizon
+        self.ricl_step_offset = ricl_step_offset
 
     def __getitem__(self, index: SupportsIndex) -> dict:
         retrieved_indices = self.all_retrieved_indices[index, :, :]

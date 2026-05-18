@@ -84,6 +84,11 @@ class Pi0FASTRiclConfig(_model.BaseModelConfig):
     num_retrieved_observations: int = 5
     use_action_interpolation: bool = False
     lamda: float = 10.0
+    # If > 0, the retrieval scheme places the top-1 NN at slot 0 and fills the remaining
+    # slots with that NN's own trajectory at step + j*ricl_step_offset (j=1..k-1), falling
+    # back to the next unused NN whenever the offset step exceeds the NN's trajectory length.
+    # Must match between training and inference. 0 = original top-k NN behavior.
+    ricl_step_offset: int = 0
 
     @property
     @override

@@ -745,6 +745,45 @@ _CONFIGS = [
         wandb_enabled=False,
     ),
 
+    TrainConfig(
+        name="pi0_fast_libero_ricl_step5_offset",
+        finetuning_collected_demos_dir="preprocessing/collected_demos_training",
+        model=pi0_fast_ricl.Pi0FASTRiclConfig(
+            action_dim=7,
+            action_horizon=10,
+            max_token_len=180,
+            num_retrieved_observations=4,
+            use_action_interpolation=True,
+            lamda=10.0,
+            ricl_step_offset=5,
+        ),
+        data=RiclLiberoDataConfig(
+            repo_id=None,
+            assets=AssetsConfig(asset_id="libero"),
+            base_config=DataConfig(prompt_from_task=False),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/mnt/data/vhoangth2/ckpts/openpi/checkpoints/pi0_fast_libero/finetune_pi0fast_libero_icl_job/14999/params"),
+        num_train_steps=10_000,
+        batch_size=8,
+        freeze_filter=pi0_fast_ricl.Pi0FASTRiclConfig(
+            action_dim=7,
+            action_horizon=10,
+            max_token_len=180,
+            num_retrieved_observations=4,
+            use_action_interpolation=True,
+            lamda=10.0,
+            ricl_step_offset=5,
+        ).get_freeze_filter_with_frozen_img_encoder(),
+        ema_decay=None,
+        log_interval=1,
+        save_interval=5000,
+        keep_period=300,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=300, peak_lr=2.5e-5, decay_steps=3000, decay_lr=2.5e-6
+        ),
+        # wandb_enabled=False,
+    ),
+
     #
     # Perceiver-RICL LIBERO configs.
     # Uses PerceiverResampler to compress retrieved samples into fixed-size latents
