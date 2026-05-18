@@ -103,6 +103,7 @@ class RiclPolicy(BasePolicy):
         lamda: float | None = None,
         action_horizon: int | None = None,
         max_distance_file: str = "assets/max_distance.json",
+        ricl_step_offset: int = 0,
     ):
         self._sample_actions = nnx_utils.module_jit(model.sample_actions)
         self._input_transform = _transforms.compose(transforms)
@@ -114,6 +115,10 @@ class RiclPolicy(BasePolicy):
         self._use_action_interpolation = use_action_interpolation
         self._lamda = lamda
         self._action_horizon = action_horizon
+        # If > 0, retrieve only the top-1 NN and fill remaining slots with the same
+        # trajectory at +ricl_step_offset, +2*ricl_step_offset, ... When a slot would
+        # exceed the NN trajectory length, fall back to the next unused NN.
+        self._ricl_step_offset = int(ricl_step_offset)
         # setup demos for retrieval
         print()
         logger.info(f'loading demos from {demos_dir}...')
@@ -126,7 +131,7 @@ class RiclPolicy(BasePolicy):
         logger.info(f'building retrieval index...')
         self._knn_index, knn_index_infos = build_index(embeddings=_all_embeddings, # Note: embeddings have to be float to avoid errors in autofaiss / embedding_reader!
                                             save_on_disk=False,
-                                            min_nearest_neighbors_to_retrieve=self._knn_k + 5, # default: 20
+                                            min_nearest_neighbors_to_retrieve=max(self._knn_k + 5, 2 * self._knn_k), # default: 20; bumped to support ricl_step_offset fallback pool
                                             max_index_query_time_ms=10, # default: 10
                                             max_index_memory_usage="25G", # default: "16G"
                                             current_memory_available="50G", # default: "32G"
@@ -174,12 +179,41 @@ class RiclPolicy(BasePolicy):
         # embed
         query_embedding = embed(obs["query_top_image"], self._dinov2)
         assert query_embedding.shape == (1, EMBED_DIM), f"{query_embedding.shape=}"
-        # retrieve
-        topk_distance, topk_indices = self._knn_index.search(query_embedding, self._knn_k)
-        retrieved_indices = self._all_indices[topk_indices]
-        assert retrieved_indices.shape == (1, self._knn_k, 2), f"{retrieved_indices.shape=}"
+        # retrieve a pool large enough to cover all fallback slots when ricl_step_offset is active
+        pool_size = self._knn_k if self._ricl_step_offset == 0 else 2 * self._knn_k
+        pool_size = min(pool_size, len(self._all_indices))
+        _topk_distance, topk_indices = self._knn_index.search(query_embedding, pool_size)
+        pool_indices = self._all_indices[topk_indices][0]  # (pool_size, 2)
+        # Build the k slot list:
+        #   - If ricl_step_offset == 0: original behavior (top-k NNs).
+        #   - Else: slot 0 = top-1 NN at its step; slot j>=1 = top-1 NN at step + j*offset,
+        #     falling back to the next unused NN in the pool when that step is out of range.
+        slots = []  # list of (ep_idx, step_idx)
+        if self._ricl_step_offset == 0:
+            for ep_idx, step_idx in pool_indices[: self._knn_k]:
+                slots.append((int(ep_idx), int(step_idx)))
+        else:
+            nn0_ep = int(pool_indices[0, 0])
+            nn0_step = int(pool_indices[0, 1])
+            nn0_traj_len = int(self._demos[nn0_ep]["actions"].shape[0])
+            next_fallback = 1  # next unused NN in pool_indices (slot 0 consumed pool_indices[0])
+            for j in range(self._knn_k):
+                cand_step = nn0_step + j * self._ricl_step_offset
+                if cand_step < nn0_traj_len:
+                    slots.append((nn0_ep, cand_step))
+                else:
+                    if next_fallback < pool_indices.shape[0]:
+                        fb_ep = int(pool_indices[next_fallback, 0])
+                        fb_step = int(pool_indices[next_fallback, 1])
+                        slots.append((fb_ep, fb_step))
+                        next_fallback += 1
+                    else:
+                        # Pool exhausted; reuse the last fallback we picked (or top-1 if none).
+                        slots.append(slots[-1] if slots else (nn0_ep, nn0_step))
+            logger.info(f"ricl_step_offset={self._ricl_step_offset} slots={slots} (nn0_traj_len={nn0_traj_len})")
+        assert len(slots) == self._knn_k
         # collect retrieved info
-        for ct, (ep_idx, step_idx) in enumerate(retrieved_indices[0]):
+        for ct, (ep_idx, step_idx) in enumerate(slots):
             demo = self._demos[ep_idx]
             more_obs[f"retrieved_{ct}_state"] = demo["state"][step_idx]
             more_obs[f"retrieved_{ct}_wrist_image"] = demo["wrist_image"][step_idx]
@@ -192,8 +226,9 @@ class RiclPolicy(BasePolicy):
             more_obs[f"retrieved_{ct}_prompt"] = demo["prompt"].item()
         # Compute exp_lamda_distances if use_action_interpolation
         if self._use_action_interpolation:
-            first_embedding = self._demos[retrieved_indices[0, 0, 0]]["top_image_embeddings"][retrieved_indices[0, 0, 1]]
-            distances = [0.0] + [np.linalg.norm(self._demos[ep_idx]["top_image_embeddings"][step_idx:step_idx+1] - first_embedding) for ep_idx, step_idx in retrieved_indices[0, 1:]]
+            first_ep, first_step = slots[0]
+            first_embedding = self._demos[first_ep]["top_image_embeddings"][first_step]
+            distances = [0.0] + [np.linalg.norm(self._demos[ep_idx]["top_image_embeddings"][step_idx:step_idx+1] - first_embedding) for ep_idx, step_idx in slots[1:]]
             distances.append(np.linalg.norm(query_embedding - first_embedding))
             distances = np.clip(np.array(distances), 0, self._max_dist) / self._max_dist
             print(f'distances: {distances}')

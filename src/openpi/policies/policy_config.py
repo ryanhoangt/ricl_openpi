@@ -90,6 +90,7 @@ def create_trained_ricl_policy(
     demos_dir: str,
     norm_stats: dict[str, transforms.NormStats] | None = None,
     max_distance_file: str = "assets/max_distance.json",
+    ricl_step_offset: int = 0,
 ) -> _policy.RiclPolicy:
     """Create a ricl policy from a trained checkpoint.
 
@@ -130,6 +131,7 @@ def create_trained_ricl_policy(
         lamda=train_config.model.lamda,
         action_horizon=train_config.model.action_horizon,
         max_distance_file=max_distance_file,
+        ricl_step_offset=ricl_step_offset,
     )
 
 

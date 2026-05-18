@@ -5,4 +5,5 @@ services:
       --policy.config ${RICL_CONFIG}
       --policy.dir ${RICL_CHECKPOINT}
       --policy.demos_dir ${RICL_DEMOS}
-      --policy.max-distance-file ${RICL_MAX_DIST:-assets/max_distance.json}"
+      --policy.max-distance-file ${RICL_MAX_DIST:-assets/max_distance.json}
+      --policy.ricl-step-offset ${RICL_STEP_OFFSET:-0}"

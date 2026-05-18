@@ -32,6 +32,9 @@ class Checkpoint:
     demos_dir: str
     # Path to max_distance.json for distance normalization during action interpolation.
     max_distance_file: str = "assets/max_distance.json"
+    # If > 0, use top-1 NN at its step for slot 0 and that NN's step + j*offset for slot j>=1.
+    # Slots whose step exceeds the NN trajectory length fall back to the next unused NN. 0 = original behavior.
+    ricl_step_offset: int = 0
 
 
 @dataclasses.dataclass
@@ -65,6 +68,7 @@ def create_policy(args: Args) -> _policy.Policy:
         _config.get_config(args.policy.config), args.policy.dir,
         demos_dir=args.policy.demos_dir,
         max_distance_file=args.policy.max_distance_file,
+        ricl_step_offset=args.policy.ricl_step_offset,
     )
 
 
