@@ -22,6 +22,43 @@ def find_episodes(root: Path) -> list[tuple[str, Path]]:
     ]
 
 
+def apply_offset_scheme(pool_pairs, pool_sq_distances, query_emb, all_emb, support_npzs, knn_k, offset):
+    """Transform a top-pool of NNs into the k-step-offset slot list used by RiclPolicy.
+
+    Slot 0 = top-1 NN at its step. Slot j>=1 = (NN_0.ep, NN_0.step + j*offset), falling
+    back to the next unused pool entry on overflow. Returned distances are raw L2 from
+    query to the chosen slot embedding (informational; not what the policy gates on).
+    """
+    n_steps, pool_size, _ = pool_pairs.shape
+    ep_lens = [n["state"].shape[0] for n in support_npzs]
+    ep_flat_start = np.concatenate(([0], np.cumsum(ep_lens)))[:-1]
+
+    slots = np.zeros((n_steps, knn_k, 2), dtype=np.int32)
+    distances = np.zeros((n_steps, knn_k), dtype=np.float32)
+
+    for q in range(n_steps):
+        nn0_ep = int(pool_pairs[q, 0, 0])
+        nn0_step = int(pool_pairs[q, 0, 1])
+        nn0_traj_len = ep_lens[nn0_ep]
+        next_fallback = 1
+        for j in range(knn_k):
+            cand_step = nn0_step + j * offset
+            if cand_step < nn0_traj_len:
+                slots[q, j, 0] = nn0_ep
+                slots[q, j, 1] = cand_step
+                slot_emb = all_emb[ep_flat_start[nn0_ep] + cand_step]
+                distances[q, j] = float(np.linalg.norm(query_emb[q] - slot_emb))
+            elif next_fallback < pool_size:
+                slots[q, j, 0] = int(pool_pairs[q, next_fallback, 0])
+                slots[q, j, 1] = int(pool_pairs[q, next_fallback, 1])
+                distances[q, j] = float(np.sqrt(max(pool_sq_distances[q, next_fallback], 0.0)))
+                next_fallback += 1
+            else:
+                slots[q, j] = slots[q, j - 1] if j > 0 else np.array([nn0_ep, nn0_step], dtype=np.int32)
+                distances[q, j] = distances[q, j - 1] if j > 0 else 0.0
+    return slots, distances
+
+
 def load_modality(npz, modality: str) -> np.ndarray:
     return np.concatenate([npz[k] for k in MODALITY_KEYS[modality]], axis=1).astype(np.float32)
 
@@ -111,6 +148,9 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--max-distance-file", type=Path, default=Path("assets/max_distance.json"),
                         help="json with {'distances': {'max': float}} for the max_dist reference line")
+    parser.add_argument("--ricl-step-offset", type=int, default=0,
+                        help="if > 0, apply the k-step-offset slot scheme: slot 0 = top-1 NN; "
+                             "slot j>=1 = top-1 NN at step + j*offset; fallback to next unused pool entry on overflow")
     args = parser.parse_args()
 
     same_folder = args.query_dir is None or args.query_dir.resolve() == args.index_dir.resolve()
@@ -120,10 +160,13 @@ def main():
         args.index_dir, args.query_modality, exclude
     )
 
+    # With offset > 0 we need a pool larger than knn_k so the fallback can grab unused NNs.
+    pool_size = args.knn_k if args.ricl_step_offset == 0 else min(2 * args.knn_k, all_emb.shape[0])
+
     knn_index, _ = build_index(
         embeddings=all_emb,
         save_on_disk=False,
-        min_nearest_neighbors_to_retrieve=args.knn_k + 5,
+        min_nearest_neighbors_to_retrieve=max(args.knn_k + 5, pool_size + 5),
         max_index_query_time_ms=10,
         max_index_memory_usage="25G",
         current_memory_available="50G",
@@ -139,9 +182,16 @@ def main():
     query_emb = load_modality(query_npz, args.query_modality)
     n_steps = query_emb.shape[0]
 
-    sq_distances, flat_indices = knn_index.search(query_emb, args.knn_k)
-    distances = np.sqrt(np.clip(sq_distances, 0.0, None))
-    retrieved_pairs = flat_to_ep_step[flat_indices]
+    sq_distances, flat_indices = knn_index.search(query_emb, pool_size)
+    pool_pairs = flat_to_ep_step[flat_indices]
+
+    if args.ricl_step_offset > 0:
+        retrieved_pairs, distances = apply_offset_scheme(
+            pool_pairs, sq_distances, query_emb, all_emb, support_npzs, args.knn_k, args.ricl_step_offset
+        )
+    else:
+        retrieved_pairs = pool_pairs
+        distances = np.sqrt(np.clip(sq_distances, 0.0, None))
 
     max_dist = None
     if args.max_distance_file is not None and args.max_distance_file.exists():
@@ -161,6 +211,7 @@ def main():
         query_modality=args.query_modality,
         knn_k=args.knn_k,
         query_n_steps=n_steps,
+        ricl_step_offset=args.ricl_step_offset,
     )
 
     save_summary_plots(args.output_dir, distances, retrieved_pairs, rel_names, support_npzs, n_steps, max_dist=max_dist)
