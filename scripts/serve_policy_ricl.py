@@ -32,6 +32,9 @@ class Checkpoint:
     demos_dir: str
     # Path to max_distance.json for distance normalization during action interpolation.
     max_distance_file: str = "assets/max_distance.json"
+    # Optional override for the k-step-offset retrieval slot scheme. -1 = use the value baked
+    # into the model config (frozen with the checkpoint); >=0 = override at inference for ablation.
+    ricl_step_offset: int = -1
 
 
 @dataclasses.dataclass
@@ -65,6 +68,7 @@ def create_policy(args: Args) -> _policy.Policy:
         _config.get_config(args.policy.config), args.policy.dir,
         demos_dir=args.policy.demos_dir,
         max_distance_file=args.policy.max_distance_file,
+        ricl_step_offset_override=args.policy.ricl_step_offset,
     )
 
 
