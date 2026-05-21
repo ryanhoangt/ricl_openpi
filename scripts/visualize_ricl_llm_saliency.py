@@ -57,6 +57,89 @@ def load_model(checkpoint_dir: str, config_name: str):
     return model, train_config
 
 
+MODALITY_KEYS = {
+    "top": ["top_image_embeddings"],
+    "wrist": ["wrist_image_embeddings"],
+    "both": ["top_image_embeddings", "wrist_image_embeddings"],
+}
+
+
+def _action_chunk(npz, step, action_horizon):
+    actions = npz["actions"]
+    end = min(step + action_horizon, len(actions))
+    chunk = actions[step:end]
+    if len(chunk) < action_horizon:
+        chunk = np.concatenate([chunk, np.tile(chunk[-1:], (action_horizon - len(chunk), 1))])
+    return chunk
+
+
+def _fill_slot(data, prefix, npz, step, action_horizon):
+    data[f"{prefix}top_image"] = npz["top_image"][step]
+    data[f"{prefix}wrist_image"] = npz["wrist_image"][step]
+    data[f"{prefix}state"] = npz["state"][step]
+    data[f"{prefix}actions"] = _action_chunk(npz, step, action_horizon)
+    data[f"{prefix}prompt"] = npz["prompt"].item()
+
+
+def build_ricl_raw_data_nn(demos_dir: str, num_retrieved: int, action_horizon: int,
+                            query_modality: str = "top") -> dict:
+    """Build a raw data dict using real DINOv2-embedding NN retrieval.
+
+    Mirrors RiclPolicy.retrieve: demos[0] = query (mid-episode); demos[1:] = support set
+    (leave-one-out). Slot i = i-th nearest neighbor by L2 distance over `query_modality`
+    embeddings.
+    """
+    from autofaiss import build_index
+
+    folders = sorted(f for f in pathlib.Path(demos_dir).iterdir() if f.is_dir())
+    assert len(folders) >= 2, f"Need at least 2 demo dirs in {demos_dir}, found {len(folders)}"
+
+    keys = MODALITY_KEYS[query_modality]
+
+    def load(folder):
+        return np.load(folder / "processed_demo.npz")
+
+    def modality_emb(npz):
+        return np.concatenate([npz[k] for k in keys], axis=1).astype(np.float32)
+
+    query_npz = load(folders[0])
+    query_step = len(query_npz["state"]) // 2
+    query_emb = modality_emb(query_npz)[query_step:query_step + 1]
+
+    support_npzs = [load(f) for f in folders[1:]]
+    support_emb = np.concatenate([modality_emb(n) for n in support_npzs], axis=0)
+    flat_to_ep_step = np.array(
+        [(ep_idx, step) for ep_idx, n in enumerate(support_npzs)
+         for step in range(n["state"].shape[0])]
+    )
+
+    knn_index, _ = build_index(
+        embeddings=support_emb,
+        save_on_disk=False,
+        min_nearest_neighbors_to_retrieve=max(num_retrieved + 5, 20),
+        max_index_query_time_ms=10,
+        max_index_memory_usage="25G",
+        current_memory_available="50G",
+        metric_type="l2",
+        nb_cores=8,
+    )
+
+    _, flat_indices = knn_index.search(query_emb, num_retrieved)
+    retrieved_pairs = flat_to_ep_step[flat_indices[0]]
+
+    data = {}
+    for i, (ep_idx, step) in enumerate(retrieved_pairs):
+        _fill_slot(data, f"retrieved_{i}_", support_npzs[int(ep_idx)], int(step), action_horizon)
+
+    _fill_slot(data, "query_", query_npz, query_step, action_horizon)
+    data["query_prompt"] = query_npz["prompt"].item()
+    data["exp_lamda_distances"] = np.ones((num_retrieved + 1, 1), dtype=np.float32)
+
+    print(f"NN retrieval: query={folders[0].name} step={query_step}, "
+          f"slots={[(int(e), int(s)) for e, s in retrieved_pairs]}")
+    return data
+
+
 def build_ricl_raw_data(demos_dir: str, num_retrieved: int, action_horizon: int) -> dict:
     """Build a raw data dict from demo npz files.
 
@@ -326,6 +409,11 @@ def main():
     parser.add_argument("--demos-dir", required=True,
                         help="Directory with demo subdirs, each containing processed_demo.npz")
     parser.add_argument("--out-dir", default="saliency_vis")
+    parser.add_argument("--use-nn-retrieval", action="store_true",
+                        help="Use real DINOv2-embedding NN retrieval (matches RiclPolicy.retrieve). "
+                             "Default off uses the original synthetic context (demos cycled by index).")
+    parser.add_argument("--query-modality", choices=list(MODALITY_KEYS), default="top",
+                        help="Embedding modality for NN retrieval (only used with --use-nn-retrieval).")
     args = parser.parse_args()
 
     out_dir = pathlib.Path(args.out_dir)
@@ -338,7 +426,11 @@ def main():
 
     print("Building input from demos...")
     data_config = train_config.data.create(train_config.assets_dirs, train_config.model)
-    raw_data = build_ricl_raw_data(args.demos_dir, num_retrieved, action_horizon)
+    if args.use_nn_retrieval:
+        raw_data = build_ricl_raw_data_nn(args.demos_dir, num_retrieved, action_horizon,
+                                          query_modality=args.query_modality)
+    else:
+        raw_data = build_ricl_raw_data(args.demos_dir, num_retrieved, action_horizon)
     data = apply_transforms(raw_data, data_config)
     data = batch_data(data)
     ricl_obs = build_ricl_observation(data, num_retrieved)
