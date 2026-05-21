@@ -82,12 +82,15 @@ def _fill_slot(data, prefix, npz, step, action_horizon):
 
 
 def build_ricl_raw_data_nn(demos_dir: str, num_retrieved: int, action_horizon: int,
-                            query_modality: str = "top") -> dict:
+                            query_modality: str = "top", ricl_step_offset: int = 0) -> dict:
     """Build a raw data dict using real DINOv2-embedding NN retrieval.
 
     Mirrors RiclPolicy.retrieve: demos[0] = query (mid-episode); demos[1:] = support set
     (leave-one-out). Slot i = i-th nearest neighbor by L2 distance over `query_modality`
     embeddings.
+
+    If `ricl_step_offset > 0`: slot 0 = top-1 NN at its step; slot j>=1 = same NN's
+    trajectory at step + j*offset; fallback to the next unused pool entry on overflow.
     """
     from autofaiss import build_index
 
@@ -113,10 +116,12 @@ def build_ricl_raw_data_nn(demos_dir: str, num_retrieved: int, action_horizon: i
          for step in range(n["state"].shape[0])]
     )
 
+    pool_size = num_retrieved if ricl_step_offset == 0 else min(2 * num_retrieved, support_emb.shape[0])
+
     knn_index, _ = build_index(
         embeddings=support_emb,
         save_on_disk=False,
-        min_nearest_neighbors_to_retrieve=max(num_retrieved + 5, 20),
+        min_nearest_neighbors_to_retrieve=max(num_retrieved + 5, pool_size + 5),
         max_index_query_time_ms=10,
         max_index_memory_usage="25G",
         current_memory_available="50G",
@@ -124,8 +129,27 @@ def build_ricl_raw_data_nn(demos_dir: str, num_retrieved: int, action_horizon: i
         nb_cores=8,
     )
 
-    _, flat_indices = knn_index.search(query_emb, num_retrieved)
-    retrieved_pairs = flat_to_ep_step[flat_indices[0]]
+    _, flat_indices = knn_index.search(query_emb, pool_size)
+    pool_pairs = flat_to_ep_step[flat_indices[0]]  # (pool_size, 2)
+
+    if ricl_step_offset == 0:
+        retrieved_pairs = pool_pairs[:num_retrieved]
+    else:
+        nn0_ep = int(pool_pairs[0, 0])
+        nn0_step = int(pool_pairs[0, 1])
+        nn0_traj_len = support_npzs[nn0_ep]["state"].shape[0]
+        slots = []
+        next_fallback = 1
+        for j in range(num_retrieved):
+            cand_step = nn0_step + j * ricl_step_offset
+            if cand_step < nn0_traj_len:
+                slots.append((nn0_ep, cand_step))
+            elif next_fallback < pool_size:
+                slots.append((int(pool_pairs[next_fallback, 0]), int(pool_pairs[next_fallback, 1])))
+                next_fallback += 1
+            else:
+                slots.append(slots[-1] if slots else (nn0_ep, nn0_step))
+        retrieved_pairs = np.array(slots, dtype=np.int32)
 
     data = {}
     for i, (ep_idx, step) in enumerate(retrieved_pairs):
@@ -136,7 +160,7 @@ def build_ricl_raw_data_nn(demos_dir: str, num_retrieved: int, action_horizon: i
     data["exp_lamda_distances"] = np.ones((num_retrieved + 1, 1), dtype=np.float32)
 
     print(f"NN retrieval: query={folders[0].name} step={query_step}, "
-          f"slots={[(int(e), int(s)) for e, s in retrieved_pairs]}")
+          f"offset={ricl_step_offset}, slots={[(int(e), int(s)) for e, s in retrieved_pairs]}")
     return data
 
 
@@ -414,6 +438,10 @@ def main():
                              "Default off uses the original synthetic context (demos cycled by index).")
     parser.add_argument("--query-modality", choices=list(MODALITY_KEYS), default="top",
                         help="Embedding modality for NN retrieval (only used with --use-nn-retrieval).")
+    parser.add_argument("--ricl-step-offset", type=int, default=0,
+                        help="If > 0, apply the k-step-offset slot scheme: slot 0 = top-1 NN; "
+                             "slot j>=1 = top-1 NN at step + j*offset; fallback to next unused pool entry. "
+                             "Only used with --use-nn-retrieval.")
     args = parser.parse_args()
 
     out_dir = pathlib.Path(args.out_dir)
@@ -428,8 +456,11 @@ def main():
     data_config = train_config.data.create(train_config.assets_dirs, train_config.model)
     if args.use_nn_retrieval:
         raw_data = build_ricl_raw_data_nn(args.demos_dir, num_retrieved, action_horizon,
-                                          query_modality=args.query_modality)
+                                          query_modality=args.query_modality,
+                                          ricl_step_offset=args.ricl_step_offset)
     else:
+        if args.ricl_step_offset > 0:
+            raise ValueError("--ricl-step-offset > 0 requires --use-nn-retrieval")
         raw_data = build_ricl_raw_data(args.demos_dir, num_retrieved, action_horizon)
     data = apply_transforms(raw_data, data_config)
     data = batch_data(data)
