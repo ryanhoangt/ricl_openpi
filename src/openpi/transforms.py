@@ -236,6 +236,41 @@ class ResizeImagesRicl(DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class PatchifySegMasksRicl(DataTransformFn):
+    """Downsample full-resolution SAM masks to the SigLIP patch grid (row-major).
+
+    Consumes `query_seg_mask` and `retrieved_{i}_seg_mask` (H, W) boolean/float masks added by the
+    dataset, and emits:
+      * `query_seg_target`        (P,) soft per-patch active fraction in [0, 1] — the reconstruction GT.
+      * `retrieved_{i}_flag_mask` (P,) soft per-patch active fraction — gates the flag embedding.
+    The full-resolution masks are dropped afterward to keep them out of the batched pytree.
+    """
+
+    num_retrieved_observations: int
+    grid_size: int = 16  # 224 / 14 = 16 -> 256 patches
+
+    def _patchify(self, mask: np.ndarray) -> np.ndarray:
+        m = np.asarray(mask).astype(np.float32)
+        if m.ndim == 3:  # drop a trailing channel if present
+            m = m[..., 0]
+        h, w = m.shape
+        assert h % self.grid_size == 0 and w % self.grid_size == 0, f"mask {m.shape} not divisible by {self.grid_size}"
+        ph, pw = h // self.grid_size, w // self.grid_size
+        # (gh, ph, gw, pw) -> mean over within-patch pixels -> (gh, gw) -> flatten row-major.
+        patches = m.reshape(self.grid_size, ph, self.grid_size, pw).mean(axis=(1, 3))
+        return patches.reshape(-1).astype(np.float32)
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if "query_seg_mask" in data:
+            data["query_seg_target"] = self._patchify(data.pop("query_seg_mask"))
+        for i in range(self.num_retrieved_observations):
+            key = f"retrieved_{i}_seg_mask"
+            if key in data:
+                data[f"retrieved_{i}_flag_mask"] = self._patchify(data.pop(key))
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
 class SubsampleActions(DataTransformFn):
     stride: int
 

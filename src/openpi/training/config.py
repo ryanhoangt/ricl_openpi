@@ -17,6 +17,7 @@ import openpi.models.model as _model
 import openpi.models.pi0 as pi0
 import openpi.models.pi0_fast as pi0_fast
 import openpi.models.pi0_fast_perceiver_ricl as pi0_fast_perceiver_ricl
+import openpi.models.pi0_fast_reasoning_ricl as pi0_fast_reasoning_ricl
 import openpi.models.pi0_fast_ricl as pi0_fast_ricl
 import openpi.models.pi0_fast_traj_perceiver as pi0_fast_traj_perceiver
 import openpi.models.tokenizer as _tokenizer
@@ -512,6 +513,31 @@ class RiclLiberoDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class RiclReasoningLiberoDataConfig(RiclLiberoDataConfig):
+    """LIBERO RICL config with implicit-reasoning SAM-mask supervision.
+
+    Same as RiclLiberoDataConfig but appends PatchifySegMasksRicl to the model transforms so the
+    full-resolution union masks (added by RiclReasoningLiberoDataset) are reduced to per-patch
+    targets/flags expected by the reasoning model.
+    """
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: pi0_fast_reasoning_ricl.Pi0FASTReasoningRiclConfig) -> DataConfig:
+        base = super().create(assets_dirs, model_config)
+        model_transforms = _transforms.Group(
+            inputs=[
+                *base.model_transforms.inputs,
+                _transforms.PatchifySegMasksRicl(
+                    num_retrieved_observations=model_config.num_retrieved_observations,
+                    grid_size=int(round(model_config.num_seg_patches**0.5)),
+                ),
+            ],
+            outputs=base.model_transforms.outputs,
+        )
+        return dataclasses.replace(base, model_transforms=model_transforms)
+
+
+@dataclasses.dataclass(frozen=True)
 class TrainConfig:
     # Name of the config. Must be unique. Will be used to reference this config.
     name: tyro.conf.Suppress[str]
@@ -782,6 +808,59 @@ _CONFIGS = [
             warmup_steps=300, peak_lr=2.5e-5, decay_steps=3000, decay_lr=2.5e-6
         ),
         # wandb_enabled=False,
+    ),
+
+    #
+    # Implicit-reasoning RICL LIBERO config (reasoning tokens + SAM-mask bottleneck).
+    # NOTE: `finetuning_collected_demos_dir` must point at a buffer that has BOTH the RICL
+    # retrieval index files (ep_idxs_to_fol.json etc. + per-episode indices_and_distances.npz)
+    # AND `sam_masks_top.npz` per episode. See plan: .claude/plans/radiant-wobbling-kahan.md
+    #
+    TrainConfig(
+        name="pi0_fast_libero_reasoning_ricl",
+        finetuning_collected_demos_dir="ricl_libero_preprocessing/collected_demos",
+        model=pi0_fast_reasoning_ricl.Pi0FASTReasoningRiclConfig(
+            action_dim=7,
+            action_horizon=10,
+            max_token_len=180,
+            num_retrieved_observations=4,
+            use_action_interpolation=True,
+            lamda=10.0,
+            num_reasoning_tokens=16,
+            lambda_scene=1.0,
+            use_seg_flag=True,
+            query_patch_dropout=0.0,
+        ),
+        data=RiclReasoningLiberoDataConfig(
+            repo_id=None,
+            assets=AssetsConfig(asset_id="libero"),
+            base_config=DataConfig(prompt_from_task=False),
+        ),
+        # New params (reasoning tokens, flag embedding, seg projector) are absent from the SFT
+        # checkpoint and must be kept at their random init -> widen missing_regex.
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/mnt/data/vhoangth2/ckpts/openpi/checkpoints/pi0_fast_libero/finetune_pi0fast_libero_icl_job/14999/params",
+            missing_regex=".*(lora|reasoning|seg).*",
+        ),
+        num_train_steps=10_000,
+        batch_size=8,
+        freeze_filter=pi0_fast_reasoning_ricl.Pi0FASTReasoningRiclConfig(
+            action_dim=7,
+            action_horizon=10,
+            max_token_len=180,
+            num_retrieved_observations=4,
+            use_action_interpolation=True,
+            lamda=10.0,
+            num_reasoning_tokens=16,
+            lambda_scene=1.0,
+        ).get_freeze_filter_with_frozen_img_encoder(),
+        ema_decay=None,
+        log_interval=1,
+        save_interval=5000,
+        keep_period=300,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=300, peak_lr=2.5e-5, decay_steps=3000, decay_lr=2.5e-6
+        ),
     ),
 
     #

@@ -1,4 +1,5 @@
 from collections.abc import Iterator, Sequence
+import functools
 import logging
 import multiprocessing
 import os
@@ -615,6 +616,45 @@ class RiclLiberoDataset(Dataset):
         return self.len_dataset
 
 
+@functools.lru_cache(maxsize=64)
+def _load_union_masks(mask_path: str) -> np.ndarray:
+    """Load `sam_masks_top.npz` and union over objects -> (T, H, W) bool. Cached per file."""
+    d = np.load(mask_path)
+    masks = d["masks"]  # (T, n_obj, H, W) bool
+    if "frame_indices" in d:
+        fi = d["frame_indices"]
+        assert np.array_equal(fi, np.arange(len(fi))), f"frame_indices not contiguous in {mask_path}"
+    return np.any(masks, axis=1)  # (T, H, W)
+
+
+class RiclReasoningLiberoDataset(RiclLiberoDataset):
+    """RICL LIBERO dataset that additionally serves union SAM masks for the query and each
+    retrieved slot (top camera). Used by the implicit-reasoning config."""
+
+    def __init__(self, model_config: _pi0_fast_ricl.Pi0FASTRiclConfig, finetuning_collected_demos_dir: str | None):
+        super().__init__(model_config, finetuning_collected_demos_dir)
+        # Require a SAM mask file for every episode in the buffer; fail loudly otherwise.
+        self.all_ep_mask_paths = {}
+        for ep_idx, demo_path in self.all_ep_data_paths.items():
+            mask_path = os.path.join(os.path.dirname(demo_path), "sam_masks_top.npz")
+            assert os.path.exists(mask_path), (
+                f"Reasoning RICL requires SAM masks for every episode, but missing: {mask_path}"
+            )
+            self.all_ep_mask_paths[ep_idx] = mask_path
+
+    def _union_mask(self, ep_idx, step_idx) -> np.ndarray:
+        return _load_union_masks(self.all_ep_mask_paths[int(ep_idx)])[int(step_idx)]  # (H, W) bool
+
+    def __getitem__(self, index: SupportsIndex) -> dict:
+        data = super().__getitem__(index)
+        retrieved_indices = self.all_retrieved_indices[index, :, :]
+        query_ep_idx, query_step_idx = self.all_query_indices[index, :]
+        for ct, (ep_idx, step_idx) in enumerate(retrieved_indices):
+            data[f"retrieved_{ct}_seg_mask"] = self._union_mask(ep_idx, step_idx)
+        data["query_seg_mask"] = self._union_mask(query_ep_idx, query_step_idx)
+        return data
+
+
 def create_dataset(data_config: _config.DataConfig, model_config: _model.BaseModelConfig) -> Dataset:
     """Create a dataset for training."""
     repo_id = data_config.repo_id
@@ -690,7 +730,10 @@ def create_data_loader(
         dataset = TrajPerceiverLiberoDataset(config.model, config.finetuning_collected_demos_dir)
     elif "ricl" in config.name:
         if "libero" in config.name:
-            dataset = RiclLiberoDataset(config.model, config.finetuning_collected_demos_dir)
+            if "reasoning" in config.name:
+                dataset = RiclReasoningLiberoDataset(config.model, config.finetuning_collected_demos_dir)
+            else:
+                dataset = RiclLiberoDataset(config.model, config.finetuning_collected_demos_dir)
         else:
             dataset = RiclDroidDataset(config.model, config.finetuning_collected_demos_dir)
     elif "pi0_fast_droid___finetune_on_" in config.name:

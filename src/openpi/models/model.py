@@ -380,7 +380,34 @@ class RiclObservation(Generic[ArrayT]):
     retrieved_17_token_loss_mask: at.Bool[ArrayT, "*b l"] | None = None
     retrieved_18_token_loss_mask: at.Bool[ArrayT, "*b l"] | None = None
     retrieved_19_token_loss_mask: at.Bool[ArrayT, "*b l"] | None = None
-    
+
+    # --- Implicit-reasoning (SAM-mask bottleneck) fields. Only populated by the reasoning
+    # RICL config; None everywhere else (and at inference time). ---
+    # Per-patch target mask of the query top camera (`base_0_rgb`), soft fraction in [0, 1].
+    query_seg_target: at.Float[ArrayT, "*b p"] | None = None
+    # Per-patch flag (soft fraction in [0, 1]) of each retrieved slot's top camera object mask.
+    # Used to add a learnable flag embedding to flagged retrieved patches.
+    retrieved_0_flag_mask: at.Float[ArrayT, "*b p"] | None = None
+    retrieved_1_flag_mask: at.Float[ArrayT, "*b p"] | None = None
+    retrieved_2_flag_mask: at.Float[ArrayT, "*b p"] | None = None
+    retrieved_3_flag_mask: at.Float[ArrayT, "*b p"] | None = None
+    retrieved_4_flag_mask: at.Float[ArrayT, "*b p"] | None = None
+    retrieved_5_flag_mask: at.Float[ArrayT, "*b p"] | None = None
+    retrieved_6_flag_mask: at.Float[ArrayT, "*b p"] | None = None
+    retrieved_7_flag_mask: at.Float[ArrayT, "*b p"] | None = None
+    retrieved_8_flag_mask: at.Float[ArrayT, "*b p"] | None = None
+    retrieved_9_flag_mask: at.Float[ArrayT, "*b p"] | None = None
+    retrieved_10_flag_mask: at.Float[ArrayT, "*b p"] | None = None
+    retrieved_11_flag_mask: at.Float[ArrayT, "*b p"] | None = None
+    retrieved_12_flag_mask: at.Float[ArrayT, "*b p"] | None = None
+    retrieved_13_flag_mask: at.Float[ArrayT, "*b p"] | None = None
+    retrieved_14_flag_mask: at.Float[ArrayT, "*b p"] | None = None
+    retrieved_15_flag_mask: at.Float[ArrayT, "*b p"] | None = None
+    retrieved_16_flag_mask: at.Float[ArrayT, "*b p"] | None = None
+    retrieved_17_flag_mask: at.Float[ArrayT, "*b p"] | None = None
+    retrieved_18_flag_mask: at.Float[ArrayT, "*b p"] | None = None
+    retrieved_19_flag_mask: at.Float[ArrayT, "*b p"] | None = None
+
     @classmethod
     def from_dict(cls, data: at.PyTree[ArrayT], num_retrieved_observations: int) -> "RiclObservation[ArrayT]":
         """This method defines the mapping between unstructured data (i.e., nested dict) to the structured Observation format."""
@@ -567,6 +594,27 @@ class RiclObservation(Generic[ArrayT]):
             retrieved_17_token_loss_mask=data.get("retrieved_17_token_loss_mask"),
             retrieved_18_token_loss_mask=data.get("retrieved_18_token_loss_mask"),
             retrieved_19_token_loss_mask=data.get("retrieved_19_token_loss_mask"),
+            query_seg_target=data.get("query_seg_target"),
+            retrieved_0_flag_mask=data.get("retrieved_0_flag_mask"),
+            retrieved_1_flag_mask=data.get("retrieved_1_flag_mask"),
+            retrieved_2_flag_mask=data.get("retrieved_2_flag_mask"),
+            retrieved_3_flag_mask=data.get("retrieved_3_flag_mask"),
+            retrieved_4_flag_mask=data.get("retrieved_4_flag_mask"),
+            retrieved_5_flag_mask=data.get("retrieved_5_flag_mask"),
+            retrieved_6_flag_mask=data.get("retrieved_6_flag_mask"),
+            retrieved_7_flag_mask=data.get("retrieved_7_flag_mask"),
+            retrieved_8_flag_mask=data.get("retrieved_8_flag_mask"),
+            retrieved_9_flag_mask=data.get("retrieved_9_flag_mask"),
+            retrieved_10_flag_mask=data.get("retrieved_10_flag_mask"),
+            retrieved_11_flag_mask=data.get("retrieved_11_flag_mask"),
+            retrieved_12_flag_mask=data.get("retrieved_12_flag_mask"),
+            retrieved_13_flag_mask=data.get("retrieved_13_flag_mask"),
+            retrieved_14_flag_mask=data.get("retrieved_14_flag_mask"),
+            retrieved_15_flag_mask=data.get("retrieved_15_flag_mask"),
+            retrieved_16_flag_mask=data.get("retrieved_16_flag_mask"),
+            retrieved_17_flag_mask=data.get("retrieved_17_flag_mask"),
+            retrieved_18_flag_mask=data.get("retrieved_18_flag_mask"),
+            retrieved_19_flag_mask=data.get("retrieved_19_flag_mask"),
         )
 
 # Defines the format of the actions. This field is included as "actions" inside the dictionary
@@ -648,9 +696,14 @@ def preprocess_observation_prefix_postfix(
     train: bool = False,
     image_keys: Sequence[str] = IMAGE_KEYS,
     image_resolution: tuple[int, int] = IMAGE_RESOLUTION,
+    disable_geom_aug: bool = False,
 ) -> ObservationPrefixPostfix:
     """Preprocess the observations by performing image augmentations (if train=True), resizing (if necessary), and
     filling in a default image mask (if necessary).
+
+    When ``disable_geom_aug`` is True, the geometric augmentations (RandomCrop/Resize/Rotate) applied
+    to non-wrist cameras are skipped, leaving only the photometric ColorJitter. This is used by the
+    reasoning-RICL config so that offline SAM masks stay pixel-aligned with the image the encoder sees.
     """
 
     if not set(image_keys).issubset(observation.images):
@@ -670,7 +723,7 @@ def preprocess_observation_prefix_postfix(
             image = image / 2.0 + 0.5
 
             transforms = []
-            if "wrist" not in key:
+            if "wrist" not in key and not disable_geom_aug:
                 height, width = image.shape[1:3]
                 transforms += [
                     augmax.RandomCrop(int(width * 0.95), int(height * 0.95)),

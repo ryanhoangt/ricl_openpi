@@ -15,7 +15,10 @@ import optax
 import tqdm_loggable.auto as tqdm
 import wandb
 
+import numpy as np
+
 import openpi.models.model as _model
+import openpi.models.pi0_fast_reasoning_ricl as _pi0_fast_reasoning_ricl
 import openpi.shared.array_typing as at
 import openpi.shared.nnx_utils as nnx_utils
 import openpi.training.checkpoints as _checkpoints
@@ -177,15 +180,21 @@ def train_step(
     model.train()
 
     def loss_fn(model, rng, observation, actions):
+        # Reasoning-RICL models expose an aux dict (ce / seg loss breakdown); others return loss only.
+        if hasattr(model, "compute_loss_with_aux"):
+            per_example_loss, aux = model.compute_loss_with_aux(rng, observation, actions, train=True)
+            return jnp.mean(per_example_loss), {k: v for k, v in aux.items() if k != "seg_pred"}
         chunked_loss = model.compute_loss(rng, observation, actions, train=True, decode_indices=decode_indices)
-        return jnp.mean(chunked_loss)
+        return jnp.mean(chunked_loss), {}
 
     train_rng = jax.random.fold_in(rng, state.step)
     observation, actions = batch
 
     # Filter out frozen params.
     diff_state = nnx.DiffState(0, config.trainable_filter)
-    loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(model, train_rng, observation, actions)
+    (loss, aux), grads = nnx.value_and_grad(loss_fn, argnums=diff_state, has_aux=True)(
+        model, train_rng, observation, actions
+    )
 
     params = state.params.filter(config.trainable_filter)
     updates, new_opt_state = state.tx.update(grads, state.opt_state, params)
@@ -217,8 +226,48 @@ def train_step(
         "loss": loss,
         "grad_norm": optax.global_norm(grads),
         "param_norm": optax.global_norm(kernel_params),
+        **aux,  # ce_loss / seg_loss scalars for reasoning-RICL; empty otherwise.
     }
     return new_state, info
+
+
+# How often (in steps) to log reasoning-token mask reconstruction overlays to wandb.
+SEG_VIZ_INTERVAL = 250
+# Number of examples from the fixed viz batch to render each time.
+SEG_VIZ_NUM_EXAMPLES = 4
+
+
+def _build_seg_overlays(query_images, pred_patches, gt_patches, grid_size: int):
+    """Build wandb.Image overlays comparing predicted vs GT query masks.
+
+    query_images: (n, H, W, 3) float in [-1, 1]; pred/gt_patches: (n, P) in [0, 1].
+    Returns a list of wandb.Image (soft predicted-probability heatmap blended over the image, with
+    the GT mask outline available via wandb's native mask overlay toggle).
+    """
+    images = []
+    n, h, w, _ = query_images.shape
+    rgb = ((np.asarray(query_images) + 1.0) / 2.0 * 255.0).clip(0, 255).astype(np.uint8)
+    for i in range(n):
+        pred = np.asarray(pred_patches[i]).reshape(grid_size, grid_size)
+        gt = np.asarray(gt_patches[i]).reshape(grid_size, grid_size)
+        # Upsample patch grids to image resolution (nearest) — for visualization only.
+        pred_full = np.kron(pred, np.ones((h // grid_size, w // grid_size)))
+        gt_full = np.kron(gt, np.ones((h // grid_size, w // grid_size)))
+        # Soft red heatmap of predicted probability blended over the image.
+        heat = rgb[i].astype(np.float32)
+        heat[..., 0] = np.clip(heat[..., 0] + 180.0 * pred_full, 0, 255)
+        blended = (0.5 * rgb[i] + 0.5 * heat).astype(np.uint8)
+        images.append(
+            wandb.Image(
+                blended,
+                masks={
+                    "prediction": {"mask_data": (pred_full > 0.5).astype(np.uint8), "class_labels": {0: "bg", 1: "obj"}},
+                    "ground_truth": {"mask_data": (gt_full > 0.5).astype(np.uint8), "class_labels": {0: "bg", 1: "obj"}},
+                },
+                caption=f"ex{i}",
+            )
+        )
+    return images
 
 
 def main(config: _config.TrainConfig):
@@ -273,6 +322,25 @@ def main(config: _config.TrainConfig):
         donate_argnums=(1,),
     )
 
+    # Reasoning-RICL: set up periodic mask-reconstruction visualization on a fixed batch.
+    is_reasoning = isinstance(config.model, _pi0_fast_reasoning_ricl.Pi0FASTReasoningRiclConfig)
+    pseg_step = None
+    viz_observation = None
+    seg_grid_size = 0
+    if is_reasoning:
+        def _predict_seg(state, observation):
+            model = nnx.merge(state.model_def, state.params)
+            model.eval()
+            return model.predict_seg_mask(observation)
+
+        pseg_step = jax.jit(
+            _predict_seg,
+            in_shardings=(train_state_sharding, data_sharding),
+            out_shardings=replicated_sharding,
+        )
+        viz_observation = batch[0]  # hold the first batch fixed so progress is comparable across steps
+        seg_grid_size = int(round(config.model.num_seg_patches**0.5))
+
     start_step = int(train_state.step)
     pbar = tqdm.tqdm(
         range(start_step, config.num_train_steps),
@@ -294,6 +362,19 @@ def main(config: _config.TrainConfig):
             logging.info(f"Step {step}: {info_str}")
             wandb.log(reduced_info, step=step)
             infos = []
+
+        if is_reasoning and (step % SEG_VIZ_INTERVAL == 0):
+            with sharding.set_mesh(mesh):
+                seg_pred = pseg_step(train_state, viz_observation)
+            n = min(SEG_VIZ_NUM_EXAMPLES, seg_pred.shape[0])
+            overlays = _build_seg_overlays(
+                jax.device_get(viz_observation.query_images["base_0_rgb"][:n]),
+                jax.device_get(seg_pred[:n]),
+                jax.device_get(viz_observation.query_seg_target[:n]),
+                seg_grid_size,
+            )
+            wandb.log({"seg/overlay": overlays}, step=step)
+
         batch = next(data_iter)
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:

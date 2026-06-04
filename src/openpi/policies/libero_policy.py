@@ -176,6 +176,11 @@ class RiclLiberoInputs(transforms.DataTransformFn):
         if "inference_time" in data:
             inputs["inference_time"] = data["inference_time"]
 
+        # Pass through SAM masks (reasoning-RICL); patchified later by PatchifySegMasksRicl.
+        for prefix in all_prefix:
+            if f"{prefix}seg_mask" in data:
+                inputs[f"{prefix}seg_mask"] = data[f"{prefix}seg_mask"]
+
         return inputs
 
 
