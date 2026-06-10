@@ -818,7 +818,7 @@ _CONFIGS = [
     #
     TrainConfig(
         name="pi0_fast_libero_reasoning_ricl",
-        finetuning_collected_demos_dir="ricl_libero_preprocessing/collected_demos",
+        finetuning_collected_demos_dir="preprocessing/collected_demos_training",
         model=pi0_fast_reasoning_ricl.Pi0FASTReasoningRiclConfig(
             action_dim=7,
             action_horizon=10,
