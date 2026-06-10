@@ -237,36 +237,49 @@ SEG_VIZ_INTERVAL = 250
 SEG_VIZ_NUM_EXAMPLES = 4
 
 
-def _build_seg_overlays(query_images, pred_patches, gt_patches, grid_size: int):
-    """Build wandb.Image overlays comparing predicted vs GT query masks.
+def _soft_overlay(rgb_u8, grid, color, grid_size, alpha=0.6):
+    """Blend a soft [0,1] patch grid over an RGB image as a colored overlay (viz only)."""
+    h, w, _ = rgb_u8.shape
+    full = np.kron(grid.reshape(grid_size, grid_size), np.ones((h // grid_size, w // grid_size)))[..., None]
+    color = np.asarray(color, np.float32)
+    out = rgb_u8.astype(np.float32) * (1.0 - alpha * full) + color * (alpha * full)
+    return out.clip(0, 255).astype(np.uint8)
 
-    query_images: (n, H, W, 3) float in [-1, 1]; pred/gt_patches: (n, P) in [0, 1].
-    Returns a list of wandb.Image (soft predicted-probability heatmap blended over the image, with
-    the GT mask outline available via wandb's native mask overlay toggle).
+
+def _to_uint8(images_m1p1):
+    """(n,H,W,3) in [-1,1] -> uint8 [0,255]."""
+    return ((np.asarray(images_m1p1) + 1.0) / 2.0 * 255.0).clip(0, 255).astype(np.uint8)
+
+
+def _build_seg_overlays(query_images, pred_patches, gt_patches, grid_size, nn_images_list=None, nn_flag_list=None):
+    """One wandb.Image per example, panels left->right:
+        [ NN0(flag) | NN1(flag) | ... | query | GT(green) | pred(red) ]
+
+    Each NN panel is a retrieved neighbor's top image with its flagged object overlaid (yellow) —
+    i.e. exactly what the model gets as in-context evidence. The query trio shows where the object
+    IS (GT, green) vs where the reasoning tokens THINK it is (pred, red). Over training the red
+    should converge onto the green. NN panels are included only when nn_* are provided.
+
+    query_images / nn_images_list[j]: (n,H,W,3) in [-1,1]; pred/gt/nn_flag patches: (n,P) in [0,1].
     """
     images = []
     n, h, w, _ = query_images.shape
-    rgb = ((np.asarray(query_images) + 1.0) / 2.0 * 255.0).clip(0, 255).astype(np.uint8)
+    rgb = _to_uint8(query_images)
+    nn_rgb_list = None if nn_images_list is None else [_to_uint8(x) for x in nn_images_list]
+    sep = np.full((h, 3, 3), 255, np.uint8)  # white separator columns
     for i in range(n):
         pred = np.asarray(pred_patches[i]).reshape(grid_size, grid_size)
         gt = np.asarray(gt_patches[i]).reshape(grid_size, grid_size)
-        # Upsample patch grids to image resolution (nearest) — for visualization only.
-        pred_full = np.kron(pred, np.ones((h // grid_size, w // grid_size)))
-        gt_full = np.kron(gt, np.ones((h // grid_size, w // grid_size)))
-        # Soft red heatmap of predicted probability blended over the image.
-        heat = rgb[i].astype(np.float32)
-        heat[..., 0] = np.clip(heat[..., 0] + 180.0 * pred_full, 0, 255)
-        blended = (0.5 * rgb[i] + 0.5 * heat).astype(np.uint8)
-        images.append(
-            wandb.Image(
-                blended,
-                masks={
-                    "prediction": {"mask_data": (pred_full > 0.5).astype(np.uint8), "class_labels": {0: "bg", 1: "obj"}},
-                    "ground_truth": {"mask_data": (gt_full > 0.5).astype(np.uint8), "class_labels": {0: "bg", 1: "obj"}},
-                },
-                caption=f"ex{i}",
-            )
-        )
+        panels, caption = [], []
+        if nn_rgb_list is not None and nn_flag_list is not None:
+            for j, nn_rgb in enumerate(nn_rgb_list):
+                flag = np.asarray(nn_flag_list[j][i]).reshape(grid_size, grid_size)
+                panels += [_soft_overlay(nn_rgb[i], flag, (255, 255, 0), grid_size), sep]
+                caption.append(f"NN{j}(flag)")
+        panels += [rgb[i], sep, _soft_overlay(rgb[i], gt, (0, 255, 0), grid_size), sep,
+                   _soft_overlay(rgb[i], pred, (255, 0, 0), grid_size)]
+        caption += ["query", "GT(green)", "pred(red)"]
+        images.append(wandb.Image(np.concatenate(panels, axis=1), caption=f"ex{i}: " + " | ".join(caption)))
     return images
 
 
@@ -367,11 +380,21 @@ def main(config: _config.TrainConfig):
             with sharding.set_mesh(mesh):
                 seg_pred = pseg_step(train_state, viz_observation)
             n = min(SEG_VIZ_NUM_EXAMPLES, seg_pred.shape[0])
+            num_nn = config.model.num_retrieved_observations
+            nn_images_list = [
+                jax.device_get(getattr(viz_observation, f"retrieved_{j}_images")["base_0_rgb"][:n])
+                for j in range(num_nn)
+            ]
+            nn_flag_list = [
+                jax.device_get(getattr(viz_observation, f"retrieved_{j}_flag_mask")[:n]) for j in range(num_nn)
+            ]
             overlays = _build_seg_overlays(
                 jax.device_get(viz_observation.query_images["base_0_rgb"][:n]),
                 jax.device_get(seg_pred[:n]),
                 jax.device_get(viz_observation.query_seg_target[:n]),
                 seg_grid_size,
+                nn_images_list=nn_images_list,
+                nn_flag_list=nn_flag_list,
             )
             wandb.log({"seg/overlay": overlays}, step=step)
 
