@@ -55,6 +55,13 @@ class Pi0FASTReasoningRiclConfig(_pi0_fast_ricl.Pi0FASTRiclConfig):
     # Focal loss hyperparameters.
     focal_alpha: float = 0.25
     focal_gamma: float = 2.0
+    # Joint geometric augmentation of (top image, SAM mask) in the training dataset. Decorrelates
+    # query vs retrieved object positions so the model can't reconstruct the query mask by copying
+    # the retrieved flag. Read by RiclReasoningLiberoDataset (train-only). Replaces the disabled
+    # in-model geometric aug while keeping masks pixel-aligned with the augmented image.
+    joint_mask_aug: bool = False
+    aug_crop_scale: float = 0.95
+    aug_rotate_deg: float = 5.0
 
     @override
     def create(self, rng: at.KeyArrayLike) -> "Pi0FASTReasoningRicl":

@@ -616,6 +616,27 @@ class RiclLiberoDataset(Dataset):
         return self.len_dataset
 
 
+def _joint_geometric_aug(img_u8: np.ndarray, msk_bool: np.ndarray, rng,
+                         crop_scale: float, rotate_deg: float) -> tuple[np.ndarray, np.ndarray]:
+    """Apply the SAME random crop+resize+rotate to a top image and its SAM mask (keeps them aligned).
+
+    img_u8: (H, W, 3) uint8; msk_bool: (H, W) bool. Image uses bilinear, mask uses nearest.
+    Mirrors base RICL's geometric aug (RandomCrop -> Resize -> Rotate) but joint with the mask.
+    """
+    from PIL import Image
+
+    h, w = img_u8.shape[:2]
+    ch, cw = max(1, int(h * crop_scale)), max(1, int(w * crop_scale))
+    top = int(rng.integers(0, h - ch + 1))
+    left = int(rng.integers(0, w - cw + 1))
+    img = img_u8[top:top + ch, left:left + cw, :]
+    msk = msk_bool[top:top + ch, left:left + cw]
+    angle = float(rng.uniform(-rotate_deg, rotate_deg))
+    img_p = Image.fromarray(img).resize((w, h), Image.BILINEAR).rotate(angle, resample=Image.BILINEAR)
+    msk_p = Image.fromarray((msk.astype(np.uint8) * 255)).resize((w, h), Image.NEAREST).rotate(angle, resample=Image.NEAREST)
+    return np.asarray(img_p), (np.asarray(msk_p) > 127)
+
+
 @functools.lru_cache(maxsize=64)
 def _load_union_masks(mask_path: str) -> np.ndarray:
     """Load `sam_masks_top.npz` and union over objects -> (T, H, W) bool. Cached per file."""
@@ -641,6 +662,17 @@ class RiclReasoningLiberoDataset(RiclLiberoDataset):
                 f"Reasoning RICL requires SAM masks for every episode, but missing: {mask_path}"
             )
             self.all_ep_mask_paths[ep_idx] = mask_path
+        # Optional joint geometric augmentation of (top image, SAM mask). Train-only by construction
+        # (this dataset is never used at inference). Decorrelates query vs retrieved object positions
+        # to discourage copying the flag instead of localizing in the query scene.
+        self.joint_mask_aug = bool(getattr(model_config, "joint_mask_aug", False))
+        self.aug_crop_scale = float(getattr(model_config, "aug_crop_scale", 0.95))
+        self.aug_rotate_deg = float(getattr(model_config, "aug_rotate_deg", 5.0))
+        if self.joint_mask_aug:
+            logging.info(
+                f"RiclReasoningLiberoDataset: joint_mask_aug ON (crop_scale={self.aug_crop_scale}, "
+                f"rotate_deg={self.aug_rotate_deg})"
+            )
 
     def _union_mask(self, ep_idx, step_idx) -> np.ndarray:
         return _load_union_masks(self.all_ep_mask_paths[int(ep_idx)])[int(step_idx)]  # (H, W) bool
@@ -652,6 +684,18 @@ class RiclReasoningLiberoDataset(RiclLiberoDataset):
         for ct, (ep_idx, step_idx) in enumerate(retrieved_indices):
             data[f"retrieved_{ct}_seg_mask"] = self._union_mask(ep_idx, step_idx)
         data["query_seg_mask"] = self._union_mask(query_ep_idx, query_step_idx)
+
+        if self.joint_mask_aug:
+            # Independent random geometry per observation -> query & retrieved object positions
+            # decorrelate, so copying the retrieved flag no longer reconstructs the query mask.
+            rng = np.random.default_rng()
+            prefixes = [f"retrieved_{i}_" for i in range(retrieved_indices.shape[0])] + ["query_"]
+            for p in prefixes:
+                img, msk = _joint_geometric_aug(
+                    data[f"{p}top_image"], data[f"{p}seg_mask"], rng, self.aug_crop_scale, self.aug_rotate_deg
+                )
+                data[f"{p}top_image"] = img
+                data[f"{p}seg_mask"] = msk
         return data
 
 
