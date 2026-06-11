@@ -449,16 +449,17 @@ def plot_saliency_means(
             means.append(float(saliency[ctx_mask].mean()))
             labels.append(f"{prefix}\nctx")
             colors.append("seagreen")
-        act_mask = np.array([r == f"{prefix}_action" for r in token_roles])
-        if act_mask.any():
-            means.append(float(saliency[act_mask].mean()))
-            labels.append(f"{prefix}\naction")
-            colors.append("tomato")
+        # Order matches the sequence layout: ... ctx | reasoning | action.
         reasoning_mask = np.array([r == f"{prefix}_reasoning" for r in token_roles])
         if reasoning_mask.any():
             means.append(float(saliency[reasoning_mask].mean()))
             labels.append(f"{prefix}\nreason")
             colors.append("mediumpurple")
+        act_mask = np.array([r == f"{prefix}_action" for r in token_roles])
+        if act_mask.any():
+            means.append(float(saliency[act_mask].mean()))
+            labels.append(f"{prefix}\naction")
+            colors.append("tomato")
 
     fig, ax = plt.subplots(figsize=(7.5, 3.2))
     bars = ax.bar(range(len(means)), means, color=colors)
