@@ -122,7 +122,21 @@ class RiclPolicy(BasePolicy):
         # setup demos for retrieval
         print()
         logger.info(f'loading demos from {demos_dir}...')
-        self._demos = {demo_idx: np.load(f"{demos_dir}/{folder}/processed_demo.npz") for demo_idx, folder in enumerate(os.listdir(demos_dir)) if os.path.isdir(f"{demos_dir}/{folder}")}
+        demo_entries = [(i, folder) for i, folder in enumerate(os.listdir(demos_dir)) if os.path.isdir(f"{demos_dir}/{folder}")]
+        self._demos = {i: np.load(f"{demos_dir}/{folder}/processed_demo.npz") for i, folder in demo_entries}
+        # Reasoning-RICL flags retrieved patches with offline SAM masks. The retrieved demos come from
+        # this (labeled) priming buffer, so the flag is applied at inference too — matching training,
+        # with zero live-SAM latency. Only the live query mask + projector are dropped at inference.
+        self._attach_seg_masks = bool(getattr(model, "use_seg_flag", False))
+        self._demo_sam_paths = {i: f"{demos_dir}/{folder}/sam_masks_top.npz" for i, folder in demo_entries}
+        self._sam_union_cache: dict[int, np.ndarray] = {}
+        if self._attach_seg_masks:
+            n_missing = sum(not os.path.exists(p) for p in self._demo_sam_paths.values())
+            if n_missing:
+                logger.warning(
+                    f"{n_missing}/{len(self._demo_sam_paths)} retrieval demos lack sam_masks_top.npz; "
+                    f"retrieved flags will be skipped for those (train/inference mismatch)."
+                )
         self._all_indices = np.array([(ep_idx, step_idx) for ep_idx in list(self._demos.keys()) for step_idx in range(self._demos[ep_idx]["actions"].shape[0])])
         _all_embeddings = np.concatenate([self._demos[ep_idx]["top_image_embeddings"] for ep_idx in list(self._demos.keys())])
         assert _all_embeddings.shape == (len(self._all_indices), EMBED_DIM), f"{_all_embeddings.shape=}"
@@ -143,6 +157,13 @@ class RiclPolicy(BasePolicy):
         self._dinov2 = load_dinov2()
         self._max_dist = json.load(open(max_distance_file, 'r'))['distances']['max']
         print(f'self._max_dist: {self._max_dist} (from {max_distance_file}) [helpful to carefully check this value in case of any issues]')
+
+    def _retrieved_seg_mask(self, ep_idx: int, step_idx: int) -> np.ndarray:
+        """Union (over objects) SAM mask of a retrieved demo at a step -> (H, W) bool. Cached per demo."""
+        if ep_idx not in self._sam_union_cache:
+            d = np.load(self._demo_sam_paths[ep_idx])
+            self._sam_union_cache[ep_idx] = np.any(d["masks"], axis=1)  # (T, H, W) bool
+        return self._sam_union_cache[ep_idx][step_idx]
 
     def _ensure_query_keys(self, obs: dict) -> dict:
         if "query_top_image" not in obs:
@@ -224,6 +245,9 @@ class RiclPolicy(BasePolicy):
                 more_obs[f"retrieved_{ct}_right_image"] = np.zeros_like(more_obs[f"retrieved_{ct}_top_image"])
             more_obs[f"retrieved_{ct}_actions"] = get_action_chunk_at_inference_time(demo["actions"], step_idx, self._action_horizon)
             more_obs[f"retrieved_{ct}_prompt"] = demo["prompt"].item()
+            # Flag this retrieved neighbor's object (offline SAM mask) to match training.
+            if self._attach_seg_masks and os.path.exists(self._demo_sam_paths[ep_idx]):
+                more_obs[f"retrieved_{ct}_seg_mask"] = self._retrieved_seg_mask(ep_idx, step_idx)
         # Compute exp_lamda_distances if use_action_interpolation
         if self._use_action_interpolation:
             first_ep, first_step = slots[0]
