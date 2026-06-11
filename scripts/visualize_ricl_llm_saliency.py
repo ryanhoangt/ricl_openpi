@@ -170,6 +170,10 @@ def build_ricl_raw_data_nn(demos_dir: str, num_retrieved: int, action_horizon: i
 
     _fill_slot(data, "query_", query_npz, query_step, action_horizon)
     data["query_prompt"] = query_npz["prompt"].item()
+    if attach_seg_masks:
+        m = _load_union_seg_mask(folders[0], query_step)  # folders[0] == query episode
+        if m is not None:
+            data["query_seg_mask"] = m
     data["exp_lamda_distances"] = np.ones((num_retrieved + 1, 1), dtype=np.float32)
 
     print(f"NN retrieval: query={folders[0].name} step={query_step}, "
@@ -221,6 +225,10 @@ def build_ricl_raw_data(demos_dir: str, num_retrieved: int, action_horizon: int,
     data["query_state"] = query_npz["state"][query_step]
     data["query_actions"] = action_chunk(query_npz, query_step)
     data["query_prompt"] = query_npz["prompt"].item()
+    if attach_seg_masks:
+        m = _load_union_seg_mask(folders[0], query_step)  # folders[0] == query episode
+        if m is not None:
+            data["query_seg_mask"] = m
     # no action interpolation needed for saliency
     data["exp_lamda_distances"] = np.ones((num_retrieved + 1, 1), dtype=np.float32)
     return data
@@ -242,7 +250,8 @@ def build_ricl_observation(data: dict, num_retrieved: int) -> _model.RiclObserva
     return _model.RiclObservation.from_dict(data, num_retrieved_observations=num_retrieved)
 
 
-def compute_saliency(model, ricl_obs: _model.RiclObservation) -> tuple[np.ndarray, list, dict]:
+def compute_saliency(model, ricl_obs: _model.RiclObservation, target: str = "action",
+                     reasoning_readout: str = "seg") -> tuple[np.ndarray, list, np.ndarray]:
     """Returns saliency [T], block_ranges list, and token_role_map.
 
     Reasoning-RICL aware: if the model exposes `_embed_observation` (reasoning model), the per-block
@@ -250,6 +259,19 @@ def compute_saliency(model, ricl_obs: _model.RiclObservation) -> tuple[np.ndarra
     uses the variable-length (R-longer query) combiner, and the action NLL is taken over the query
     postfix only — matching the model's own forward. The K reasoning tokens get a `query_reasoning`
     role. Otherwise the original base-RICL behavior is used.
+
+    target:
+      * "action"   — grad of the query action NLL w.r.t. inputs (default; "what drives the actions").
+      * "reasoning"— grad of a reasoning-token readout w.r.t. inputs ("what feeds H_R"). Requires a
+        reasoning model. High saliency on query image tokens => H_R shortcuts off the query; high on
+        retrieved image tokens => H_R uses the cross-context correspondence.
+
+    reasoning_readout (only for target="reasoning"):
+      * "seg"  — scene (SAM-mask) reconstruction loss from H_R. "What does R use to localize the
+        object?" Routes through the (inference-discarded) projector and only the mask-relevant
+        subspace of H_R. Requires a query mask; falls back to "norm" if absent.
+      * "norm" — ||H_R||^2. Direction-agnostic "does this input affect R's representation at all?"
+        Needs no ground-truth mask.
     """
     from openpi.models.pi0_fast_ricl import make_attn_mask
 
@@ -292,34 +314,55 @@ def compute_saliency(model, ricl_obs: _model.RiclObservation) -> tuple[np.ndarra
     all_embeddings = jnp.concatenate(list_of_embeddings, axis=1)  # [1, T, D]
     batch_size, seq_len = all_embeddings.shape[:2]
 
+    postfix_len = query_obs.tokenized_prompt_postfix.shape[1]
     if is_reasoning:
         attn_mask = model.combine_attn_masks_varlen(list_of_attn_masks, batch_size, block_lens)
-        # Reasoning model scores the query postfix only (matches compute_loss_with_aux).
-        postfix_len = query_obs.tokenized_prompt_postfix.shape[1]
-        targets = jax.nn.one_hot(query_obs.tokenized_prompt_postfix, model.PaliGemma.llm.module.vocab_size)
-        loss_mask = query_obs.token_loss_mask[:, -postfix_len:]
-        tail = postfix_len
     else:
         attn_mask = model.combine_attn_masks(list_of_attn_masks, batch_size, seq_len, num_obs)
-        targets = jax.nn.one_hot(
-            jnp.concatenate([query_obs.tokenized_prompt_prefix[:, 1:], query_obs.tokenized_prompt_postfix], axis=1),
-            model.PaliGemma.llm.module.vocab_size,
-        )
-        loss_mask = query_obs.token_loss_mask[:, 1:]  # shift by 1 for next-token prediction
-        tail = targets.shape[1]
 
-    # --- Gradient saliency w.r.t. input embeddings ---
-    def action_nll(embeddings):
-        pre_logits, _, _ = model.PaliGemma.llm(
-            embedded_prefix=embeddings[:, :-1],
-            mask=attn_mask[:, :-1, :-1],
-            return_prelogits=True,
-        )
-        logits, _ = model.PaliGemma.llm(pre_logits=pre_logits[:, -tail:])
-        logp = jax.nn.log_softmax(logits, axis=-1)
-        return -jnp.sum(targets * logp * loss_mask[..., None])
+    if target == "action":
+        if is_reasoning:
+            # Reasoning model scores the query postfix only (matches compute_loss_with_aux).
+            targets = jax.nn.one_hot(query_obs.tokenized_prompt_postfix, model.PaliGemma.llm.module.vocab_size)
+            loss_mask = query_obs.token_loss_mask[:, -postfix_len:]
+            tail = postfix_len
+        else:
+            targets = jax.nn.one_hot(
+                jnp.concatenate([query_obs.tokenized_prompt_prefix[:, 1:], query_obs.tokenized_prompt_postfix], axis=1),
+                model.PaliGemma.llm.module.vocab_size,
+            )
+            loss_mask = query_obs.token_loss_mask[:, 1:]  # shift by 1 for next-token prediction
+            tail = targets.shape[1]
 
-    grads = jax.grad(action_nll)(all_embeddings)
+        def objective(embeddings):
+            pre_logits, _, _ = model.PaliGemma.llm(
+                embedded_prefix=embeddings[:, :-1], mask=attn_mask[:, :-1, :-1], return_prelogits=True
+            )
+            logits, _ = model.PaliGemma.llm(pre_logits=pre_logits[:, -tail:])
+            logp = jax.nn.log_softmax(logits, axis=-1)
+            return -jnp.sum(targets * logp * loss_mask[..., None])
+
+    elif target == "reasoning":
+        assert is_reasoning, "target='reasoning' requires a reasoning-RICL model"
+        query_seg_target = ricl_obs.query_seg_target  # may be None if the query demo lacks a mask
+        use_seg = reasoning_readout == "seg" and query_seg_target is not None
+        if reasoning_readout == "seg" and query_seg_target is None:
+            print("  [reasoning_readout=seg] no query mask available -> falling back to ||H_R||^2 (norm).")
+
+        def objective(embeddings):
+            pre_logits, _, _ = model.PaliGemma.llm(
+                embedded_prefix=embeddings[:, :-1], mask=attn_mask[:, :-1, :-1], return_prelogits=True
+            )
+            r_start = all_embeddings.shape[1] - postfix_len - K
+            h_r = pre_logits[:, r_start:r_start + K, :]  # reasoning-token hidden states
+            if use_seg:
+                seg_logits = model.seg_projector(h_r)
+                return jnp.sum(model._seg_loss(seg_logits, query_seg_target))
+            return jnp.sum(h_r.astype(jnp.float32) ** 2)
+    else:
+        raise ValueError(f"Unknown target {target!r}; expected 'action' or 'reasoning'.")
+
+    grads = jax.grad(objective)(all_embeddings)
     # Input × gradient saliency, L2 over embedding dim → [T]
     saliency = np.asarray(jnp.sqrt(jnp.sum((grads * all_embeddings) ** 2, axis=-1))[0].astype(jnp.float32))
 
@@ -380,6 +423,7 @@ def plot_saliency_per_position(
     num_retrieved: int,
     out_path: pathlib.Path,
     bins_per_block: int = 80,
+    target: str = "action",
 ):
     """Compact per-position view (binned within each block separately so lines
     never connect across block boundaries)."""
@@ -420,7 +464,9 @@ def plot_saliency_per_position(
 
     ax.set_xlabel("Token position")
     ax.set_ylabel("Input×Grad saliency")
-    ax.set_title("RICL LLM input saliency over token positions", pad=18)
+    tgt_label = ("reasoning tokens (H_R, %s)" % target.split("_", 1)[1] if target.startswith("reasoning_")
+                 else "reasoning tokens (H_R)" if target == "reasoning" else "action generation")
+    ax.set_title(f"RICL input saliency for {tgt_label} over token positions", pad=18)
     ax.legend(loc="upper left", frameon=False)
 
     plt.tight_layout()
@@ -435,6 +481,7 @@ def plot_saliency_means(
     block_ranges: list,
     num_retrieved: int,
     out_path: pathlib.Path,
+    target: str = "action",
 ):
     """Bar chart of mean saliency per (block, role)."""
     means, labels, colors = [], [], []
@@ -466,7 +513,9 @@ def plot_saliency_means(
     ax.set_xticks(range(len(means)))
     ax.set_xticklabels(labels, fontsize=8)
     ax.set_ylabel("Mean Input×Grad saliency")
-    ax.set_title("Mean saliency per (block, role)")
+    tgt_label = ("reasoning tokens (H_R, %s)" % target.split("_", 1)[1] if target.startswith("reasoning_")
+                 else "reasoning tokens (H_R)" if target == "reasoning" else "action generation")
+    ax.set_title(f"Mean saliency per (block, role) — {tgt_label}")
 
     # Annotate values
     for bar, val in zip(bars, means):
@@ -495,6 +544,13 @@ def main():
                         help="If > 0, apply the k-step-offset slot scheme: slot 0 = top-1 NN; "
                              "slot j>=1 = top-1 NN at step + j*offset; fallback to next unused pool entry. "
                              "Only used with --use-nn-retrieval.")
+    parser.add_argument("--target", choices=["action", "reasoning"], default="action",
+                        help="What to attribute saliency for. 'action' = query action NLL (default). "
+                             "'reasoning' = readout of the reasoning-token hidden states H_R. Reasoning model only.")
+    parser.add_argument("--reasoning-readout", choices=["seg", "norm"], default="seg",
+                        help="Readout of H_R for --target reasoning. 'seg' = SAM-mask reconstruction loss "
+                             "('what R uses to localize the object'; needs a query mask, else falls back to norm). "
+                             "'norm' = ||H_R||^2 ('does this input affect R's representation at all'; no mask needed).")
     args = parser.parse_args()
 
     out_dir = pathlib.Path(args.out_dir)
@@ -526,8 +582,16 @@ def main():
     data = batch_data(data)
     ricl_obs = build_ricl_observation(data, num_retrieved)
 
-    print("Computing saliency (this runs a backward pass through the LLM)...")
-    saliency, block_ranges, token_roles = compute_saliency(model, ricl_obs)
+    if args.target == "reasoning" and not is_reasoning:
+        raise ValueError("--target reasoning requires a reasoning-RICL config/checkpoint.")
+    # Tag outputs so seg/norm reasoning runs don't overwrite each other.
+    out_tag = args.target if args.target != "reasoning" else f"reasoning_{args.reasoning_readout}"
+    print(f"Computing saliency for target='{args.target}'"
+          f"{f' (readout={args.reasoning_readout})' if args.target == 'reasoning' else ''} "
+          f"(backward pass through the LLM)...")
+    saliency, block_ranges, token_roles = compute_saliency(
+        model, ricl_obs, target=args.target, reasoning_readout=args.reasoning_readout
+    )
 
     print("\n=== Mean saliency by role ===")
     for role in ["img", "ctx", "action", "reasoning"]:
@@ -548,9 +612,9 @@ def main():
     print("\n  Higher saliency = LLM relies on these tokens more for action generation.")
 
     plot_saliency_per_position(saliency, token_roles, block_ranges, num_retrieved,
-                                out_path=out_dir / "ricl_saliency_positions.png")
+                                out_path=out_dir / f"ricl_saliency_positions_{out_tag}.png", target=out_tag)
     plot_saliency_means(saliency, token_roles, block_ranges, num_retrieved,
-                        out_path=out_dir / "ricl_saliency_means.png")
+                        out_path=out_dir / f"ricl_saliency_means_{out_tag}.png", target=out_tag)
 
 
 if __name__ == "__main__":
