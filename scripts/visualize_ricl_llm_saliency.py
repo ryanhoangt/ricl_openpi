@@ -81,8 +81,17 @@ def _fill_slot(data, prefix, npz, step, action_horizon):
     data[f"{prefix}prompt"] = npz["prompt"].item()
 
 
+def _load_union_seg_mask(folder, step):
+    """Union (over objects) SAM mask of a demo folder at a step -> (H, W) bool, or None if absent."""
+    p = pathlib.Path(folder) / "sam_masks_top.npz"
+    if not p.exists():
+        return None
+    return np.any(np.load(p)["masks"], axis=1)[step]  # (T, n_obj, H, W) -> (H, W)
+
+
 def build_ricl_raw_data_nn(demos_dir: str, num_retrieved: int, action_horizon: int,
-                            query_modality: str = "top", ricl_step_offset: int = 0) -> dict:
+                            query_modality: str = "top", ricl_step_offset: int = 0,
+                            attach_seg_masks: bool = False) -> dict:
     """Build a raw data dict using real DINOv2-embedding NN retrieval.
 
     Mirrors RiclPolicy.retrieve: demos[0] = query (mid-episode); demos[1:] = support set
@@ -154,6 +163,10 @@ def build_ricl_raw_data_nn(demos_dir: str, num_retrieved: int, action_horizon: i
     data = {}
     for i, (ep_idx, step) in enumerate(retrieved_pairs):
         _fill_slot(data, f"retrieved_{i}_", support_npzs[int(ep_idx)], int(step), action_horizon)
+        if attach_seg_masks:
+            m = _load_union_seg_mask(folders[1 + int(ep_idx)], int(step))  # folders[1:] == support set
+            if m is not None:
+                data[f"retrieved_{i}_seg_mask"] = m
 
     _fill_slot(data, "query_", query_npz, query_step, action_horizon)
     data["query_prompt"] = query_npz["prompt"].item()
@@ -164,7 +177,8 @@ def build_ricl_raw_data_nn(demos_dir: str, num_retrieved: int, action_horizon: i
     return data
 
 
-def build_ricl_raw_data(demos_dir: str, num_retrieved: int, action_horizon: int) -> dict:
+def build_ricl_raw_data(demos_dir: str, num_retrieved: int, action_horizon: int,
+                        attach_seg_masks: bool = False) -> dict:
     """Build a raw data dict from demo npz files.
 
     Uses demo[0] as query, demos[1..num_retrieved] (cycling) as retrieved.
@@ -188,7 +202,8 @@ def build_ricl_raw_data(demos_dir: str, num_retrieved: int, action_horizon: int)
 
     data = {}
     for i in range(num_retrieved):
-        npz = load(folders[(i + 1) % len(folders)])
+        folder = folders[(i + 1) % len(folders)]
+        npz = load(folder)
         step = (i * 7) % len(npz["state"])  # spread across the episode
         prefix = f"retrieved_{i}_"
         data[f"{prefix}top_image"] = npz["top_image"][step]
@@ -196,6 +211,10 @@ def build_ricl_raw_data(demos_dir: str, num_retrieved: int, action_horizon: int)
         data[f"{prefix}state"] = npz["state"][step]
         data[f"{prefix}actions"] = action_chunk(npz, step)
         data[f"{prefix}prompt"] = npz["prompt"].item()
+        if attach_seg_masks:
+            m = _load_union_seg_mask(folder, step)
+            if m is not None:
+                data[f"{prefix}seg_mask"] = m
 
     data["query_top_image"] = query_npz["top_image"][query_step]
     data["query_wrist_image"] = query_npz["wrist_image"][query_step]
@@ -224,9 +243,18 @@ def build_ricl_observation(data: dict, num_retrieved: int) -> _model.RiclObserva
 
 
 def compute_saliency(model, ricl_obs: _model.RiclObservation) -> tuple[np.ndarray, list, dict]:
-    """Returns saliency [T], block_ranges list, and token_role_map."""
+    """Returns saliency [T], block_ranges list, and token_role_map.
+
+    Reasoning-RICL aware: if the model exposes `_embed_observation` (reasoning model), the per-block
+    embeddings include the retrieved SAM flags and the appended reasoning tokens, the attention mask
+    uses the variable-length (R-longer query) combiner, and the action NLL is taken over the query
+    postfix only — matching the model's own forward. The K reasoning tokens get a `query_reasoning`
+    role. Otherwise the original base-RICL behavior is used.
+    """
     from openpi.models.pi0_fast_ricl import make_attn_mask
 
+    is_reasoning = hasattr(model, "_embed_observation")
+    K = int(getattr(model, "num_reasoning_tokens", 0)) if is_reasoning else 0
     num_retrieved = model.num_retrieved_observations
     num_obs = num_retrieved + 1
 
@@ -234,44 +262,51 @@ def compute_saliency(model, ricl_obs: _model.RiclObservation) -> tuple[np.ndarra
     list_of_embeddings = []
     list_of_attn_masks = []
     block_ranges = []  # (start, end, is_query, token_loss_mask)
+    block_lens = []
     pos = 0
+    query_obs = None
 
     for i in range(num_obs):
-        prefix = f"retrieved_{i}_" if i < num_retrieved else "query_"
         is_query = (i == num_retrieved)
+        prefix = "query_" if is_query else f"retrieved_{i}_"
         obs_i = _model.extract_observation_from_ricl_observation(ricl_obs, prefix)
         obs_i = _model.preprocess_observation_prefix_postfix(
-            None, obs_i, train=False, image_keys=list(obs_i.images.keys())
+            None, obs_i, train=False, image_keys=list(obs_i.images.keys()), disable_geom_aug=is_reasoning
         )
-        emb_i, mask_i, ar_i = model.embed_inputs(obs_i)
+        if is_reasoning:
+            flag_mask = None if is_query else getattr(ricl_obs, f"retrieved_{i}_flag_mask")
+            emb_i, mask_i, ar_i = model._embed_observation(obs_i, flag_mask=flag_mask, append_reasoning=is_query)
+        else:
+            emb_i, mask_i, ar_i = model.embed_inputs(obs_i)
         attn_i = make_attn_mask(mask_i, ar_i)
 
         block_len = emb_i.shape[1]
-        loss_mask_i = obs_i.token_loss_mask  # [B, max_token_len] — 1 for action tokens
-
         list_of_embeddings.append(emb_i)
         list_of_attn_masks.append(attn_i)
-        block_ranges.append((pos, pos + block_len, is_query, loss_mask_i))
+        block_ranges.append((pos, pos + block_len, is_query, obs_i.token_loss_mask))
+        block_lens.append(block_len)
         pos += block_len
+        if is_query:
+            query_obs = obs_i
 
     all_embeddings = jnp.concatenate(list_of_embeddings, axis=1)  # [1, T, D]
     batch_size, seq_len = all_embeddings.shape[:2]
 
-    attn_mask = model.combine_attn_masks(list_of_attn_masks, batch_size, seq_len, num_obs)
-
-    # Targets: action tokens from the query block
-    query_obs = _model.extract_observation_from_ricl_observation(ricl_obs, "query_")
-    query_obs = _model.preprocess_observation_prefix_postfix(
-        None, query_obs, train=False, image_keys=list(query_obs.images.keys())
-    )
-    targets = jax.nn.one_hot(
-        jnp.concatenate([
-            query_obs.tokenized_prompt_prefix[:, 1:],
-            query_obs.tokenized_prompt_postfix
-        ], axis=1),
-        model.PaliGemma.llm.module.vocab_size,
-    )
-    loss_mask = query_obs.token_loss_mask[:, 1:]  # shift by 1 for next-token prediction
+    if is_reasoning:
+        attn_mask = model.combine_attn_masks_varlen(list_of_attn_masks, batch_size, block_lens)
+        # Reasoning model scores the query postfix only (matches compute_loss_with_aux).
+        postfix_len = query_obs.tokenized_prompt_postfix.shape[1]
+        targets = jax.nn.one_hot(query_obs.tokenized_prompt_postfix, model.PaliGemma.llm.module.vocab_size)
+        loss_mask = query_obs.token_loss_mask[:, -postfix_len:]
+        tail = postfix_len
+    else:
+        attn_mask = model.combine_attn_masks(list_of_attn_masks, batch_size, seq_len, num_obs)
+        targets = jax.nn.one_hot(
+            jnp.concatenate([query_obs.tokenized_prompt_prefix[:, 1:], query_obs.tokenized_prompt_postfix], axis=1),
+            model.PaliGemma.llm.module.vocab_size,
+        )
+        loss_mask = query_obs.token_loss_mask[:, 1:]  # shift by 1 for next-token prediction
+        tail = targets.shape[1]
 
     # --- Gradient saliency w.r.t. input embeddings ---
     def action_nll(embeddings):
@@ -280,9 +315,7 @@ def compute_saliency(model, ricl_obs: _model.RiclObservation) -> tuple[np.ndarra
             mask=attn_mask[:, :-1, :-1],
             return_prelogits=True,
         )
-        logits, _ = model.PaliGemma.llm(
-            pre_logits=pre_logits[:, -targets.shape[1]:],
-        )
+        logits, _ = model.PaliGemma.llm(pre_logits=pre_logits[:, -tail:])
         logp = jax.nn.log_softmax(logits, axis=-1)
         return -jnp.sum(targets * logp * loss_mask[..., None])
 
@@ -292,17 +325,29 @@ def compute_saliency(model, ricl_obs: _model.RiclObservation) -> tuple[np.ndarra
 
     # --- Build token role map for annotation ---
     token_roles = np.full(seq_len, "pad", dtype=object)
+    q_prefix_len = query_obs.tokenized_prompt_prefix.shape[1]
+    q_postfix_len = query_obs.tokenized_prompt_postfix.shape[1]
     for idx, (bstart, bend, is_query, tloss) in enumerate(block_ranges):
-        img_end = bstart + IMG_TOKENS_PER_BLOCK
-        text_start = img_end
         prefix = "query" if is_query else f"ret_{idx}"
+        img_end = bstart + IMG_TOKENS_PER_BLOCK
         token_roles[bstart:img_end] = f"{prefix}_img"
-        # within text region: action tokens vs. state/prompt tokens
-        loss_flat = np.asarray(tloss[0])  # [max_token_len]
-        for j, l in enumerate(loss_flat):
-            tok_pos = text_start + j
-            if tok_pos < bend:
-                token_roles[tok_pos] = f"{prefix}_action" if l else f"{prefix}_ctx"
+        if is_query and is_reasoning:
+            # text layout in the query block: prefix(ctx) | R(reasoning) | postfix(action-by-loss)
+            cur = img_end
+            token_roles[cur:cur + q_prefix_len] = f"{prefix}_ctx"
+            cur += q_prefix_len
+            token_roles[cur:cur + K] = f"{prefix}_reasoning"
+            cur += K
+            post_loss = np.asarray(query_obs.token_loss_mask[0, -q_postfix_len:])
+            for j in range(q_postfix_len):
+                if cur + j < bend:
+                    token_roles[cur + j] = f"{prefix}_action" if post_loss[j] else f"{prefix}_ctx"
+        else:
+            loss_flat = np.asarray(tloss[0])  # [max_token_len]
+            for j, l in enumerate(loss_flat):
+                tok_pos = img_end + j
+                if tok_pos < bend:
+                    token_roles[tok_pos] = f"{prefix}_action" if l else f"{prefix}_ctx"
 
     return saliency, block_ranges, token_roles
 
@@ -315,7 +360,8 @@ def _bin_saliency_per_block(saliency: np.ndarray, token_roles: np.ndarray,
     n_bins = min(n_bins, block_len)
     edges = np.linspace(bstart, bend, n_bins + 1, dtype=int)
     centers = (edges[:-1] + edges[1:]) / 2.0
-    per_role = {"img": np.full(n_bins, np.nan), "ctx": np.full(n_bins, np.nan), "action": np.full(n_bins, np.nan)}
+    per_role = {"img": np.full(n_bins, np.nan), "ctx": np.full(n_bins, np.nan),
+                "action": np.full(n_bins, np.nan), "reasoning": np.full(n_bins, np.nan)}
     for b in range(n_bins):
         sl = slice(edges[b], edges[b + 1])
         roles_in_bin = token_roles[sl]
@@ -343,6 +389,7 @@ def plot_saliency_per_position(
         ("img", "#1f77b4", "image"),
         ("action", "#d62728", "action"),
         ("ctx", "#2ca02c", "state/prompt"),
+        ("reasoning", "#9467bd", "reasoning token"),
     ]
 
     # Plot once per (block, role). Use the legend label only on the first
@@ -407,6 +454,11 @@ def plot_saliency_means(
             means.append(float(saliency[act_mask].mean()))
             labels.append(f"{prefix}\naction")
             colors.append("tomato")
+        reasoning_mask = np.array([r == f"{prefix}_reasoning" for r in token_roles])
+        if reasoning_mask.any():
+            means.append(float(saliency[reasoning_mask].mean()))
+            labels.append(f"{prefix}\nreason")
+            colors.append("mediumpurple")
 
     fig, ax = plt.subplots(figsize=(7.5, 3.2))
     bars = ax.bar(range(len(means)), means, color=colors)
@@ -454,14 +506,21 @@ def main():
 
     print("Building input from demos...")
     data_config = train_config.data.create(train_config.assets_dirs, train_config.model)
+    # Reasoning-RICL flags retrieved patches with offline SAM masks; attach them so the saliency
+    # forward matches training/inference (otherwise the flag would be absent → off-distribution).
+    is_reasoning = hasattr(model, "_embed_observation")
+    if is_reasoning:
+        print("Reasoning-RICL config detected: attaching retrieved SAM flags + reasoning tokens.")
     if args.use_nn_retrieval:
         raw_data = build_ricl_raw_data_nn(args.demos_dir, num_retrieved, action_horizon,
                                           query_modality=args.query_modality,
-                                          ricl_step_offset=args.ricl_step_offset)
+                                          ricl_step_offset=args.ricl_step_offset,
+                                          attach_seg_masks=is_reasoning)
     else:
         if args.ricl_step_offset > 0:
             raise ValueError("--ricl-step-offset > 0 requires --use-nn-retrieval")
-        raw_data = build_ricl_raw_data(args.demos_dir, num_retrieved, action_horizon)
+        raw_data = build_ricl_raw_data(args.demos_dir, num_retrieved, action_horizon,
+                                       attach_seg_masks=is_reasoning)
     data = apply_transforms(raw_data, data_config)
     data = batch_data(data)
     ricl_obs = build_ricl_observation(data, num_retrieved)
@@ -470,7 +529,7 @@ def main():
     saliency, block_ranges, token_roles = compute_saliency(model, ricl_obs)
 
     print("\n=== Mean saliency by role ===")
-    for role in ["img", "ctx", "action"]:
+    for role in ["img", "ctx", "action", "reasoning"]:
         for idx in list(range(num_retrieved)) + ["query"]:
             prefix = "query" if idx == "query" else f"ret_{idx}"
             key = f"{prefix}_{role}"
