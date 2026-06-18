@@ -818,7 +818,7 @@ _CONFIGS = [
     #
     TrainConfig(
         name="pi0_fast_libero_reasoning_ricl",
-        finetuning_collected_demos_dir="preprocessing/collected_demos_training",
+        finetuning_collected_demos_dir="preprocessing/collected_demos_training_with_sam2_and_subgoal_labels",
         model=pi0_fast_reasoning_ricl.Pi0FASTReasoningRiclConfig(
             action_dim=7,
             action_horizon=10,
@@ -839,7 +839,7 @@ _CONFIGS = [
         # New params (reasoning tokens, flag embedding, seg projector) are absent from the SFT
         # checkpoint and must be kept at their random init -> widen missing_regex.
         weight_loader=weight_loaders.CheckpointWeightLoader(
-            "/mnt/data/vhoangth2/ckpts/openpi/checkpoints/pi0_fast_libero/finetune_pi0fast_libero_icl_job/14999/params",
+            "/mnt/data/vhoangth2/ckpts/openpi/checkpoints/pi0_fast_libero/finetune_pi0fast_libero_icl_15k_job/14999/params",
             missing_regex=".*(lora|reasoning|seg).*",
         ),
         num_train_steps=10_000,
@@ -857,7 +857,6 @@ _CONFIGS = [
         ema_decay=None,
         log_interval=1,
         save_interval=5000,
-        keep_period=300,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=300, peak_lr=2.5e-5, decay_steps=3000, decay_lr=2.5e-6
         ),
