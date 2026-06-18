@@ -35,6 +35,8 @@ class Checkpoint:
     # Optional override for the k-step-offset retrieval slot scheme. -1 = use the value baked
     # into the model config (frozen with the checkpoint); >=0 = override at inference for ablation.
     ricl_step_offset: int = -1
+    # Ablation: if True, keep only the top-1 NN (slot 0) and duplicate it across all ctx slots.
+    only_nn_slot0: bool = False
 
 
 @dataclasses.dataclass
@@ -69,6 +71,7 @@ def create_policy(args: Args) -> _policy.Policy:
         demos_dir=args.policy.demos_dir,
         max_distance_file=args.policy.max_distance_file,
         ricl_step_offset_override=args.policy.ricl_step_offset,
+        only_nn_slot0=args.policy.only_nn_slot0,
     )
 
 

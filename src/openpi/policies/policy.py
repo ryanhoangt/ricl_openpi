@@ -104,6 +104,7 @@ class RiclPolicy(BasePolicy):
         action_horizon: int | None = None,
         max_distance_file: str = "assets/max_distance.json",
         ricl_step_offset: int = 0,
+        only_nn_slot0: bool = False,
     ):
         self._sample_actions = nnx_utils.module_jit(model.sample_actions)
         self._input_transform = _transforms.compose(transforms)
@@ -119,6 +120,9 @@ class RiclPolicy(BasePolicy):
         # trajectory at +ricl_step_offset, +2*ricl_step_offset, ... When a slot would
         # exceed the NN trajectory length, fall back to the next unused NN.
         self._ricl_step_offset = int(ricl_step_offset)
+        # Ablation: if True, keep only the top-1 nearest neighbor (slot 0) and duplicate it
+        # across all remaining ctx slots, so the model sees the same single NN k times.
+        self._only_nn_slot0 = bool(only_nn_slot0)
         # setup demos for retrieval
         print()
         logger.info(f'loading demos from {demos_dir}...')
@@ -212,6 +216,10 @@ class RiclPolicy(BasePolicy):
                         slots.append(slots[-1] if slots else (nn0_ep, nn0_step))
             logger.info(f"ricl_step_offset={self._ricl_step_offset} slots={slots} (nn0_traj_len={nn0_traj_len})")
         assert len(slots) == self._knn_k
+        # Ablation: duplicate the top-1 NN (slot 0) across all slots.
+        if self._only_nn_slot0:
+            slots = [slots[0]] * self._knn_k
+            logger.info(f"only_nn_slot0=True; duplicating slot 0 across all {self._knn_k} slots: {slots}")
         # collect retrieved info
         for ct, (ep_idx, step_idx) in enumerate(slots):
             demo = self._demos[ep_idx]

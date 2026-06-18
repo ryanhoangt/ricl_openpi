@@ -91,6 +91,7 @@ def create_trained_ricl_policy(
     norm_stats: dict[str, transforms.NormStats] | None = None,
     max_distance_file: str = "assets/max_distance.json",
     ricl_step_offset_override: int = -1,
+    only_nn_slot0: bool = False,
 ) -> _policy.RiclPolicy:
     """Create a ricl policy from a trained checkpoint.
 
@@ -103,6 +104,8 @@ def create_trained_ricl_policy(
         max_distance_file: Path to the max_distance.json file for distance normalization.
         ricl_step_offset_override: If >= 0, override the k-step-offset retrieval scheme value
             from the model config at inference time (for ablation). -1 = use the config value.
+        only_nn_slot0: If True, keep only the top-1 NN (slot 0) and duplicate it across all ctx
+            slots at inference time (for ablation).
     """
     logging.info("Loading model...")
     model = train_config.model.load(_model.restore_params(f"{checkpoint_dir}/params", dtype=jnp.bfloat16))
@@ -138,6 +141,7 @@ def create_trained_ricl_policy(
             if ricl_step_offset_override >= 0
             else getattr(train_config.model, "ricl_step_offset", 0)
         ),
+        only_nn_slot0=only_nn_slot0,
     )
 
 
