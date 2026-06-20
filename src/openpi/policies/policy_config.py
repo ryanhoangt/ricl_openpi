@@ -91,6 +91,7 @@ def create_trained_ricl_policy(
     norm_stats: dict[str, transforms.NormStats] | None = None,
     max_distance_file: str = "assets/max_distance.json",
     ricl_step_offset_override: int = -1,
+    record_debug: bool = False,
 ) -> _policy.RiclPolicy:
     """Create a ricl policy from a trained checkpoint.
 
@@ -138,6 +139,7 @@ def create_trained_ricl_policy(
             if ricl_step_offset_override >= 0
             else getattr(train_config.model, "ricl_step_offset", 0)
         ),
+        record_debug=record_debug,
     )
 
 

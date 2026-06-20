@@ -35,6 +35,9 @@ class Checkpoint:
     # Optional override for the k-step-offset retrieval slot scheme. -1 = use the value baked
     # into the model config (frozen with the checkpoint); >=0 = override at inference for ablation.
     ricl_step_offset: int = -1
+    # If True (reasoning-RICL only), return a per-step debug panel (retrieved ctx + masks + predicted
+    # query mask) in the infer response so the client can write a `<rollout>_w_seg_masks.mp4` video.
+    record_debug: bool = False
 
 
 @dataclasses.dataclass
@@ -69,6 +72,7 @@ def create_policy(args: Args) -> _policy.Policy:
         demos_dir=args.policy.demos_dir,
         max_distance_file=args.policy.max_distance_file,
         ricl_step_offset_override=args.policy.ricl_step_offset,
+        record_debug=args.policy.record_debug,
     )
 
 

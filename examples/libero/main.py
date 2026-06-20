@@ -111,6 +111,7 @@ def eval_libero(args: Args) -> None:
             # Setup
             t = 0
             replay_images = []
+            debug_panels = []  # per-inference seg-mask debug panels (reasoning-RICL + --policy.record-debug)
 
             logging.info(f"Starting episode {task_episodes+1}...")
             while t < max_steps + args.num_steps_wait:
@@ -153,7 +154,10 @@ def eval_libero(args: Args) -> None:
                         }
 
                         # Query model to get action
-                        action_chunk = client.infer(element)["actions"]
+                        result = client.infer(element)
+                        action_chunk = result["actions"]
+                        if "debug_panel" in result:
+                            debug_panels.append(np.asarray(result["debug_panel"]))
                         assert (
                             len(action_chunk) >= args.replan_steps
                         ), f"We want to replan every {args.replan_steps} steps, but policy only predicts {len(action_chunk)} steps."
@@ -187,6 +191,11 @@ def eval_libero(args: Args) -> None:
                 [np.asarray(x) for x in replay_images],
                 fps=10,
             )
+            # Debug seg-mask video alongside the rollout (same name + suffix), one frame per inference.
+            if debug_panels:
+                seg_video_path = video_path.with_name(video_path.stem + "_w_seg_masks" + video_path.suffix)
+                imageio.mimwrite(seg_video_path, debug_panels, fps=5)
+                logging.info(f"Saved seg-mask debug video: {seg_video_path}")
 
             # Log current results
             logging.info(f"Success: {done}")

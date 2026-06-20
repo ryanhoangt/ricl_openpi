@@ -88,6 +88,49 @@ def get_action_chunk_at_inference_time(actions, step_idx, action_horizon):
     return action_chunk
 
 
+def _build_seg_debug_panel(query_img_u8, nn_imgs_u8, nn_masks, pred_grid, sims, slots=None):
+    """Debug panel: row of [NN_i top img + SAM mask (yellow), labeled] over [query | query+pred (red)].
+
+    query_img_u8/nn_imgs_u8[i]: (H,W,3) uint8; nn_masks[i]: (H,W) bool or None; pred_grid: (g,g) in
+    [0,1]; sims: per-observation exp(-lambda*dist) closeness; slots: optional (k,2) (ep,step) labels.
+    Returns a single (2H, k*W, 3) uint8 image.
+    """
+    from PIL import Image, ImageDraw
+
+    query_img_u8 = np.asarray(query_img_u8)
+    h, w = query_img_u8.shape[:2]
+
+    def overlay(rgb_u8, m, color, alpha=0.5):
+        m = np.asarray(m, np.float32)
+        if m.shape[:2] != (h, w):
+            m = np.asarray(Image.fromarray((m * 255).astype(np.uint8)).resize((w, h), Image.BILINEAR)) / 255.0
+        out = rgb_u8.astype(np.float32) * (1 - alpha * m[..., None]) + np.asarray(color, np.float32) * (alpha * m[..., None])
+        return out.clip(0, 255).astype(np.uint8)
+
+    def label(arr, text):
+        im = Image.fromarray(np.ascontiguousarray(arr))
+        ImageDraw.Draw(im).text((3, 3), text, fill=(255, 255, 0))
+        return np.asarray(im)
+
+    nn_panels = []
+    for i in range(len(nn_imgs_u8)):
+        msk = np.zeros((h, w), np.float32) if nn_masks[i] is None else nn_masks[i]
+        txt = f"NN{i} sim={sims[i]:.2f}" if i < len(sims) else f"NN{i}"
+        if slots is not None and i < len(slots):
+            txt += f" e{int(slots[i][0])}/{int(slots[i][1])}"
+        nn_panels.append(label(overlay(np.asarray(nn_imgs_u8[i]), msk, (255, 255, 0)), txt))
+    top = np.concatenate(nn_panels, axis=1)
+
+    bottom = np.concatenate(
+        [label(query_img_u8, "query"), label(overlay(query_img_u8, pred_grid, (255, 0, 0)), "query+pred")], axis=1
+    )
+    if bottom.shape[1] < top.shape[1]:
+        bottom = np.concatenate([bottom, np.zeros((h, top.shape[1] - bottom.shape[1], 3), np.uint8)], axis=1)
+    elif top.shape[1] < bottom.shape[1]:
+        top = np.concatenate([top, np.zeros((h, bottom.shape[1] - top.shape[1], 3), np.uint8)], axis=1)
+    return np.concatenate([top, bottom], axis=0)
+
+
 class RiclPolicy(BasePolicy):
     def __init__(
         self,
@@ -104,8 +147,14 @@ class RiclPolicy(BasePolicy):
         action_horizon: int | None = None,
         max_distance_file: str = "assets/max_distance.json",
         ricl_step_offset: int = 0,
+        record_debug: bool = False,
     ):
         self._sample_actions = nnx_utils.module_jit(model.sample_actions)
+        # Reasoning-RICL only: predict the query seg mask from the reasoning tokens for the debug video.
+        self._record_debug = bool(record_debug)
+        self._predict_seg_mask = (
+            nnx_utils.module_jit(model.predict_seg_mask) if hasattr(model, "predict_seg_mask") else None
+        )
         self._input_transform = _transforms.compose(transforms)
         self._output_transform = _transforms.compose(output_transforms)
         self._rng = rng or jax.random.key(0)
@@ -233,6 +282,7 @@ class RiclPolicy(BasePolicy):
                         slots.append(slots[-1] if slots else (nn0_ep, nn0_step))
             logger.info(f"ricl_step_offset={self._ricl_step_offset} slots={slots} (nn0_traj_len={nn0_traj_len})")
         assert len(slots) == self._knn_k
+        more_obs["_debug_slots"] = np.array(slots, dtype=np.int32)  # (k, 2) (ep, step) for the debug panel
         # collect retrieved info
         for ct, (ep_idx, step_idx) in enumerate(slots):
             demo = self._demos[ep_idx]
@@ -325,16 +375,33 @@ class RiclPolicy(BasePolicy):
 
         self._rng, sample_rng = jax.random.split(self._rng)
         logger.info(f'sampling...')
+        ricl_obs = _model.RiclObservation.from_dict(inputs, num_retrieved_observations=self._knn_k)
         outputs = {
             "query_state": inputs["query_state"],
-            "query_actions": self._sample_actions(sample_rng, _model.RiclObservation.from_dict(inputs, num_retrieved_observations=self._knn_k), **self._sample_kwargs),
+            "query_actions": self._sample_actions(sample_rng, ricl_obs, **self._sample_kwargs),
         }
+
+        # Optional debug panel: retrieved ctx (+ SAM masks) and the reasoning-token predicted query mask.
+        debug_panel = None
+        if self._record_debug and self._predict_seg_mask is not None:
+            seg_pred = np.asarray(self._predict_seg_mask(ricl_obs))[0]  # (P,)
+            gs = int(round(seg_pred.shape[0] ** 0.5))
+            debug_panel = _build_seg_debug_panel(
+                obs["query_top_image"],
+                [obs[f"retrieved_{i}_top_image"] for i in range(self._knn_k)],
+                [obs.get(f"retrieved_{i}_seg_mask") for i in range(self._knn_k)],
+                seg_pred.reshape(gs, gs),
+                np.asarray(obs["exp_lamda_distances"]).reshape(-1),
+                obs.get("_debug_slots"),
+            )
 
         # Unbatch and convert to np.ndarray.
         logger.info(f'unbatching...')
         outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
         final_outputs = self._output_transform(outputs)
         print(f'final_outputs: {final_outputs}')
+        if debug_panel is not None:
+            final_outputs["debug_panel"] = debug_panel
         return final_outputs
 
     @property
