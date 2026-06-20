@@ -273,7 +273,10 @@ class Pi0FASTReasoningRicl(_pi0_fast_ricl.Pi0FASTRicl):
         input_token_embeddings = jnp.concatenate(list_of_embeddings, axis=1)
         batch_size = input_token_embeddings.shape[0]
         attn_mask = self.combine_attn_masks_varlen(list_of_attn_masks, batch_size, block_lens)
-        postfix_len = query_obs.tokenized_prompt_postfix.shape[1]
+        # No query postfix at inference (actions are generated, not teacher-forced) -> R is the last block.
+        postfix_len = (
+            query_obs.tokenized_prompt_postfix.shape[1] if query_obs.tokenized_prompt_postfix is not None else 0
+        )
         return input_token_embeddings, attn_mask, query_obs, postfix_len, first_targets
 
     # ------------------------------------------------------------------ losses
@@ -367,9 +370,11 @@ class Pi0FASTReasoningRicl(_pi0_fast_ricl.Pi0FASTRicl):
             None, ricl_observation, train=False
         )
         seq_len = input_token_embeddings.shape[1]
+        # Full forward (no last-token drop): at inference R is the final block, so its last token's
+        # hidden state must be kept. We only need H_R here, not next-token logits.
         pre_logits, _, _ = self.PaliGemma.llm(
-            embedded_prefix=input_token_embeddings[:, :-1],
-            mask=attn_mask[:, :-1, :-1],
+            embedded_prefix=input_token_embeddings,
+            mask=attn_mask,
             return_prelogits=True,
         )
         r_start = seq_len - postfix_len - self.num_reasoning_tokens
