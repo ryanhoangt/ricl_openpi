@@ -381,17 +381,24 @@ def main(config: _config.TrainConfig):
                 seg_pred = pseg_step(train_state, viz_observation)
             n = min(SEG_VIZ_NUM_EXAMPLES, seg_pred.shape[0])
             num_nn = config.model.num_retrieved_observations
+
+            # Per-object model emits (b, N, P) for seg_pred / target / flags; collapse the object
+            # axis (max over objects) to a single (b, P) mask for the overlay panels.
+            def _collapse_objs(arr):
+                arr = jax.device_get(arr)
+                return arr.max(axis=1) if arr.ndim == 3 else arr
+
             nn_images_list = [
                 jax.device_get(getattr(viz_observation, f"retrieved_{j}_images")["base_0_rgb"][:n])
                 for j in range(num_nn)
             ]
             nn_flag_list = [
-                jax.device_get(getattr(viz_observation, f"retrieved_{j}_flag_mask")[:n]) for j in range(num_nn)
+                _collapse_objs(getattr(viz_observation, f"retrieved_{j}_flag_mask")[:n]) for j in range(num_nn)
             ]
             overlays = _build_seg_overlays(
                 jax.device_get(viz_observation.query_images["base_0_rgb"][:n]),
-                jax.device_get(seg_pred[:n]),
-                jax.device_get(viz_observation.query_seg_target[:n]),
+                _collapse_objs(seg_pred[:n]),
+                _collapse_objs(viz_observation.query_seg_target[:n]),
                 seg_grid_size,
                 nn_images_list=nn_images_list,
                 nn_flag_list=nn_flag_list,

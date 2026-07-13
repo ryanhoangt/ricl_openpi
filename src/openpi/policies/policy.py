@@ -177,8 +177,11 @@ class RiclPolicy(BasePolicy):
         # this (labeled) priming buffer, so the flag is applied at inference too — matching training,
         # with zero live-SAM latency. Only the live query mask + projector are dropped at inference.
         self._attach_seg_masks = bool(getattr(model, "use_seg_flag", False))
+        # >1 for the per-object (instance-level) reasoning model; 1 (or absent) means union masks.
+        self._num_seg_objects = int(getattr(model, "num_seg_objects", 1))
         self._demo_sam_paths = {i: f"{demos_dir}/{folder}/sam_masks_top.npz" for i, folder in demo_entries}
         self._sam_union_cache: dict[int, np.ndarray] = {}
+        self._sam_id_cache: dict[int, np.ndarray] = {}
         if self._attach_seg_masks:
             n_missing = sum(not os.path.exists(p) for p in self._demo_sam_paths.values())
             if n_missing:
@@ -208,7 +211,25 @@ class RiclPolicy(BasePolicy):
         print(f'self._max_dist: {self._max_dist} (from {max_distance_file}) [helpful to carefully check this value in case of any issues]')
 
     def _retrieved_seg_mask(self, ep_idx: int, step_idx: int) -> np.ndarray:
-        """Union (over objects) SAM mask of a retrieved demo at a step -> (H, W) bool. Cached per demo."""
+        """Retrieved SAM mask of a demo at a step, matching the model's flag layout:
+          * union model (num_seg_objects == 1): (H, W) bool, OR over objects.
+          * per-object model (num_seg_objects  > 1): (N, H, W) bool, scattered by global obj_id.
+        Cached per demo."""
+        if self._num_seg_objects > 1:
+            if ep_idx not in self._sam_id_cache:
+                d = np.load(self._demo_sam_paths[ep_idx])
+                masks = d["masks"]  # (T, n_obj, H, W)
+                obj_ids = d["obj_ids"]  # (n_obj,)
+                t, _, h, w = masks.shape
+                out = np.zeros((t, self._num_seg_objects, h, w), dtype=bool)
+                for j, oid in enumerate(obj_ids):
+                    oid = int(oid)
+                    assert 0 <= oid < self._num_seg_objects, (
+                        f"obj_id {oid} out of range [0, {self._num_seg_objects}) in {self._demo_sam_paths[ep_idx]}"
+                    )
+                    out[:, oid] = masks[:, j]
+                self._sam_id_cache[ep_idx] = out  # (T, N, H, W) bool
+            return self._sam_id_cache[ep_idx][step_idx]  # (N, H, W)
         if ep_idx not in self._sam_union_cache:
             d = np.load(self._demo_sam_paths[ep_idx])
             self._sam_union_cache[ep_idx] = np.any(d["masks"], axis=1)  # (T, H, W) bool
@@ -384,12 +405,21 @@ class RiclPolicy(BasePolicy):
         # Optional debug panel: retrieved ctx (+ SAM masks) and the reasoning-token predicted query mask.
         debug_panel = None
         if self._record_debug and self._predict_seg_mask is not None:
-            seg_pred = np.asarray(self._predict_seg_mask(ricl_obs))[0]  # (P,)
+            seg_pred = np.asarray(self._predict_seg_mask(ricl_obs))[0]  # (P,) or (N, P) per-object
+            if seg_pred.ndim > 1:  # per-object: collapse channels to a single displayable mask
+                seg_pred = seg_pred.max(axis=0)  # (P,)
             gs = int(round(seg_pred.shape[0] ** 0.5))
+            # Retrieved SAM masks are (H, W) for union, (N, H, W) for per-object -> collapse to (H, W).
+            retrieved_seg_masks = []
+            for i in range(self._knn_k):
+                m = obs.get(f"retrieved_{i}_seg_mask")
+                if m is not None and np.asarray(m).ndim > 2:
+                    m = np.asarray(m).max(axis=0)
+                retrieved_seg_masks.append(m)
             debug_panel = _build_seg_debug_panel(
                 obs["query_top_image"],
                 [obs[f"retrieved_{i}_top_image"] for i in range(self._knn_k)],
-                [obs.get(f"retrieved_{i}_seg_mask") for i in range(self._knn_k)],
+                retrieved_seg_masks,
                 seg_pred.reshape(gs, gs),
                 np.asarray(obs["exp_lamda_distances"]).reshape(-1),
                 obs.get("_debug_slots"),

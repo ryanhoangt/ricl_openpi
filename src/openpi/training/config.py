@@ -863,9 +863,62 @@ _CONFIGS = [
     ),
 
     #
+    # Per-object (instance-level) reasoning RICL LIBERO config. Same as pi0_fast_libero_reasoning_ricl
+    # but the SAM-mask bottleneck is per-object: retrieved flags + query target carry N=num_seg_objects
+    # channels indexed by the globally-consistent SAM obj_id (union -> instance-level). The buffer must
+    # provide `sam_masks_top.npz` with consistent `obj_ids` in [0, num_seg_objects).
+    #
+    TrainConfig(
+        name="pi0_fast_libero_reasoning_per_obj_ricl",
+        finetuning_collected_demos_dir="preprocessing/collected_demos_training_with_sam2_and_subgoal_labels",
+        model=pi0_fast_reasoning_ricl.Pi0FASTReasoningRiclPerIdConfig(
+            action_dim=7,
+            action_horizon=10,
+            max_token_len=180,
+            num_retrieved_observations=4,
+            use_action_interpolation=True,
+            lamda=10.0,
+            num_reasoning_tokens=16,
+            lambda_scene=1.0,
+            use_seg_flag=True,
+            query_patch_dropout=0.0,
+            num_seg_objects=5,
+        ),
+        data=RiclReasoningLiberoDataConfig(
+            repo_id=None,
+            assets=AssetsConfig(asset_id="libero"),
+            base_config=DataConfig(prompt_from_task=False),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/mnt/data/vhoangth2/ckpts/openpi/checkpoints/pi0_fast_libero/finetune_pi0fast_libero_icl_15k_job/14999/params",
+            missing_regex=".*(lora|reasoning|seg).*",
+        ),
+        num_train_steps=10_000,
+        batch_size=8,
+        freeze_filter=pi0_fast_reasoning_ricl.Pi0FASTReasoningRiclPerIdConfig(
+            action_dim=7,
+            action_horizon=10,
+            max_token_len=180,
+            num_retrieved_observations=4,
+            use_action_interpolation=True,
+            lamda=10.0,
+            num_reasoning_tokens=16,
+            lambda_scene=1.0,
+            num_seg_objects=5,
+        ).get_freeze_filter_with_frozen_img_encoder(),
+        ema_decay=None,
+        log_interval=1,
+        save_interval=5000,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=300, peak_lr=2.5e-5, decay_steps=3000, decay_lr=2.5e-6
+        ),
+    ),
+
+    #
     # Perceiver-RICL LIBERO configs.
     # Uses PerceiverResampler to compress retrieved samples into fixed-size latents
-    # instead of brittle action interpolation.
+    # inst
+    # ead of brittle action interpolation.
     #
     TrainConfig(
         name="pi0_fast_libero_perceiver_ricl",

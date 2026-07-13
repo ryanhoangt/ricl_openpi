@@ -655,6 +655,49 @@ class RiclReasoningLiberoDataset(RiclLiberoDataset):
         return data
 
 
+@functools.lru_cache(maxsize=64)
+def _load_id_masks(mask_path: str, num_objects: int) -> np.ndarray:
+    """Load `sam_masks_top.npz` and scatter each object into its channel by (consistent) obj_id
+    -> (T, N, H, W) bool. Objects absent in a scene leave an all-zero channel. Cached per file."""
+    d = np.load(mask_path)
+    masks = d["masks"]  # (T, n_obj, H, W) bool
+    obj_ids = d["obj_ids"]  # (n_obj,) global, consistent-across-demos ids
+    if "frame_indices" in d:
+        fi = d["frame_indices"]
+        assert np.array_equal(fi, np.arange(len(fi))), f"frame_indices not contiguous in {mask_path}"
+    t, _, h, w = masks.shape
+    out = np.zeros((t, num_objects, h, w), dtype=bool)
+    for j, oid in enumerate(obj_ids):
+        oid = int(oid)
+        assert 0 <= oid < num_objects, f"obj_id {oid} out of range [0, {num_objects}) in {mask_path}"
+        out[:, oid] = masks[:, j]
+    return out
+
+
+class RiclReasoningPerIdLiberoDataset(RiclReasoningLiberoDataset):
+    """Per-object (instance-level) reasoning dataset. Serves per-object SAM masks scattered into
+    `num_seg_objects` channels by global obj_id, for both the query target and each retrieved slot.
+    Channel index == obj_id, aligned across query and retrieved slots. Used by the per-obj config."""
+
+    def __init__(self, model_config: _pi0_fast_ricl.Pi0FASTRiclConfig, finetuning_collected_demos_dir: str | None):
+        super().__init__(model_config, finetuning_collected_demos_dir)
+        self.num_seg_objects = int(getattr(model_config, "num_seg_objects", 5))
+
+    def _id_masks(self, ep_idx, step_idx) -> np.ndarray:
+        return _load_id_masks(self.all_ep_mask_paths[int(ep_idx)], self.num_seg_objects)[int(step_idx)]  # (N, H, W)
+
+    def __getitem__(self, index: SupportsIndex) -> dict:
+        # Skip RiclReasoningLiberoDataset.__getitem__ (union masks); go straight to the RICL base and
+        # attach per-object masks instead.
+        data = RiclLiberoDataset.__getitem__(self, index)
+        retrieved_indices = self.all_retrieved_indices[index, :, :]
+        query_ep_idx, query_step_idx = self.all_query_indices[index, :]
+        for ct, (ep_idx, step_idx) in enumerate(retrieved_indices):
+            data[f"retrieved_{ct}_seg_mask"] = self._id_masks(ep_idx, step_idx)
+        data["query_seg_mask"] = self._id_masks(query_ep_idx, query_step_idx)
+        return data
+
+
 def create_dataset(data_config: _config.DataConfig, model_config: _model.BaseModelConfig) -> Dataset:
     """Create a dataset for training."""
     repo_id = data_config.repo_id
@@ -731,7 +774,10 @@ def create_data_loader(
     elif "ricl" in config.name:
         if "libero" in config.name:
             if "reasoning" in config.name:
-                dataset = RiclReasoningLiberoDataset(config.model, config.finetuning_collected_demos_dir)
+                if "per_obj" in config.name:
+                    dataset = RiclReasoningPerIdLiberoDataset(config.model, config.finetuning_collected_demos_dir)
+                else:
+                    dataset = RiclReasoningLiberoDataset(config.model, config.finetuning_collected_demos_dir)
             else:
                 dataset = RiclLiberoDataset(config.model, config.finetuning_collected_demos_dir)
         else:

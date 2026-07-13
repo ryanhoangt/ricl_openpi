@@ -384,9 +384,12 @@ class RiclObservation(Generic[ArrayT]):
     # --- Implicit-reasoning (SAM-mask bottleneck) fields. Only populated by the reasoning
     # RICL config; None everywhere else (and at inference time). ---
     # Per-patch target mask of the query top camera (`base_0_rgb`), soft fraction in [0, 1].
+    # Union reasoning config: (*b, p). Per-object config: (*b, n, p) with one channel per obj_id
+    # (the leading object axis is absorbed by the variadic `*b`, so the annotation covers both).
     query_seg_target: at.Float[ArrayT, "*b p"] | None = None
     # Per-patch flag (soft fraction in [0, 1]) of each retrieved slot's top camera object mask.
-    # Used to add a learnable flag embedding to flagged retrieved patches.
+    # (*b, p) for the union config, (*b, n, p) per-object. Adds a learnable flag embedding to
+    # flagged retrieved patches.
     retrieved_0_flag_mask: at.Float[ArrayT, "*b p"] | None = None
     retrieved_1_flag_mask: at.Float[ArrayT, "*b p"] | None = None
     retrieved_2_flag_mask: at.Float[ArrayT, "*b p"] | None = None

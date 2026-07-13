@@ -125,6 +125,20 @@ class Pi0FASTReasoningRicl(_pi0_fast_ricl.Pi0FASTRicl):
 
     # ------------------------------------------------------------------ embedding helpers
 
+    def _apply_seg_flag(
+        self,
+        image_token_embeddings: at.Float[at.Array, "b p w"],
+        flag_mask: at.Float[at.Array, "b p"],
+    ) -> at.Float[at.Array, "b p w"]:
+        """Add the (single) learnable flag embedding to flagged top-camera patches.
+
+        Overridable seam: subclasses with per-object flags override this with a per-object table.
+        """
+        flag = flag_mask.astype(image_token_embeddings.dtype)  # (b, P)
+        return image_token_embeddings + (
+            flag[:, :, None] * self.seg_flag_embedding.value.astype(image_token_embeddings.dtype)[None, None, :]
+        )
+
     def _embed_observation(
         self,
         obs: _model.ObservationPrefixPostfix,
@@ -154,10 +168,7 @@ class Pi0FASTReasoningRicl(_pi0_fast_ricl.Pi0FASTRicl):
                     f"top-camera patch count {num_patches} != num_seg_patches {self.num_seg_patches}"
                 )
                 if flag_mask is not None and self.use_seg_flag:
-                    flag = flag_mask.astype(image_token_embeddings.dtype)  # (b, P)
-                    image_token_embeddings = image_token_embeddings + (
-                        flag[:, :, None] * self.seg_flag_embedding.value.astype(image_token_embeddings.dtype)[None, None, :]
-                    )
+                    image_token_embeddings = self._apply_seg_flag(image_token_embeddings, flag_mask)
                 if append_reasoning and patch_dropout_rng is not None and self.query_patch_dropout > 0.0:
                     keep = jax.random.bernoulli(
                         patch_dropout_rng, p=1.0 - self.query_patch_dropout, shape=(image_token_embeddings.shape[0], num_patches)
@@ -445,3 +456,110 @@ class Pi0FASTReasoningRicl(_pi0_fast_ricl.Pi0FASTRicl):
             batch_size,
             prefix_mask,
         )
+
+
+# ======================================================================================
+# Per-object (instance-level) variant.
+#
+# Same implicit cross-context reasoning + SAM-mask bottleneck as Pi0FASTReasoningRicl, but the
+# single union mask is replaced by N per-object channels, where channel index == the globally
+# consistent SAM `obj_id`. Retrieved flags use a per-object embedding table (aligned by channel to
+# the query target), and the query reconstruction target / projector carry an object axis. Objects
+# absent from a scene occupy all-zero channels (absence is learned via the loss; no presence head).
+# ======================================================================================
+
+
+class SegProjectorMultiObject(SegProjector):
+    """Per-object projector: reconstructs N per-object mask logit grids -> (b, N, P)."""
+
+    def __init__(self, *, llm_width: int, d_v: int, num_patches: int, num_heads: int, num_objects: int, rngs: nnx.Rngs):
+        super().__init__(llm_width=llm_width, d_v=d_v, num_patches=num_patches, num_heads=num_heads, rngs=rngs)
+        self.num_objects = num_objects
+        # Replace the base single-channel head (d_v -> 1) with a per-object head (d_v -> N).
+        self.mlp_2 = nnx.Linear(d_v, num_objects, rngs=rngs)
+
+    def __call__(self, h_r: at.Float[at.Array, "b k w"]) -> at.Float[at.Array, "b n p"]:
+        b = h_r.shape[0]
+        kv = self.proj_in(h_r.astype(jnp.float32))  # (b, K, d_v)
+        q = jnp.broadcast_to(self.spatial_queries.value[None], (b, self.num_patches, self.d_v))
+        attended = self.cross_attn(q, kv)  # (b, P, d_v)
+        x = jax.nn.gelu(self.mlp_1(attended))
+        logits = self.mlp_2(x)  # (b, P, N)
+        return jnp.transpose(logits, (0, 2, 1))  # (b, N, P)
+
+
+@dataclasses.dataclass(frozen=True)
+class Pi0FASTReasoningRiclPerIdConfig(Pi0FASTReasoningRiclConfig):
+    # Number of per-object instance channels (channel index == global SAM obj_id, in [0, N)).
+    num_seg_objects: int = 5
+    # Ablation: if True, retrieved patches are flagged with ONE shared (identity-agnostic) embedding
+    # ("salient region here") instead of a per-object table. The query target stays per-object either
+    # way; only whether object identity is injected on the retrieved side changes.
+    shared_seg_flag: bool = False
+
+    @override
+    def create(self, rng: at.KeyArrayLike) -> "Pi0FASTReasoningRiclPerId":
+        return Pi0FASTReasoningRiclPerId(self, rngs=nnx.Rngs(rng))
+
+
+class Pi0FASTReasoningRiclPerId(Pi0FASTReasoningRicl):
+    def __init__(self, config: Pi0FASTReasoningRiclPerIdConfig, rngs: nnx.Rngs):
+        super().__init__(config, rngs)
+        width = _gemma.get_config(config.paligemma_variant).width
+        self.num_seg_objects = config.num_seg_objects
+        self.shared_seg_flag = config.shared_seg_flag
+        # Flag embedding, zero-init so flagging is a no-op at step 0. Shared -> one vector (width,);
+        # per-object -> a table (N, width) indexed by obj_id.
+        flag_shape = (width,) if config.shared_seg_flag else (config.num_seg_objects, width)
+        self.seg_flag_embedding = nnx.Param(jnp.zeros(flag_shape, dtype=jnp.float32))
+        # Per-object projector -> (b, N, P).
+        self.seg_projector = SegProjectorMultiObject(
+            llm_width=width,
+            d_v=config.seg_hidden_dim,
+            num_patches=config.num_seg_patches,
+            num_heads=config.num_seg_heads,
+            num_objects=config.num_seg_objects,
+            rngs=rngs,
+        )
+
+    @override
+    def _apply_seg_flag(
+        self,
+        image_token_embeddings: at.Float[at.Array, "b p w"],
+        flag_mask: at.Float[at.Array, "b n p"],
+    ) -> at.Float[at.Array, "b p w"]:
+        """Flag retrieved patches. Per-object (default): each object's patches get its own embedding
+        row (aligned by channel to the query target). Shared: one identity-agnostic vector gates the
+        union of the object channels."""
+        flag = flag_mask.astype(image_token_embeddings.dtype)  # (b, N, P)
+        emb = self.seg_flag_embedding.value.astype(image_token_embeddings.dtype)
+        if self.shared_seg_flag:
+            gate = jnp.max(flag, axis=1)  # (b, P) union over objects
+            add = gate[:, :, None] * emb[None, None, :]  # emb: (w,) -> (b, P, w)
+        else:
+            add = jnp.einsum("bnp,nw->bpw", flag, emb)  # emb: (N, w) -> (b, P, w)
+        return image_token_embeddings + add
+
+    @override
+    def _seg_loss(
+        self,
+        seg_logits: at.Float[at.Array, "b n p"],
+        seg_target: at.Float[at.Array, "b n p"],
+    ) -> at.Float[at.Array, "b"]:
+        """Per-object focal + soft-dice. Dice is masked to present channels (absent objects have an
+        all-zero target and are handled by the focal-negative term). Returns (b,)."""
+        eps = 1e-6
+        p = jax.nn.sigmoid(seg_logits.astype(jnp.float32))  # (b, N, P)
+        t = seg_target.astype(jnp.float32)
+
+        p_c = jnp.clip(p, eps, 1.0 - eps)
+        focal_pos = self.focal_alpha * jnp.power(1.0 - p_c, self.focal_gamma) * t * -jnp.log(p_c)
+        focal_neg = (1.0 - self.focal_alpha) * jnp.power(p_c, self.focal_gamma) * (1.0 - t) * -jnp.log(1.0 - p_c)
+        focal = jnp.mean(focal_pos + focal_neg, axis=-1)  # (b, N)
+
+        inter = jnp.sum(p * t, axis=-1)  # (b, N)
+        dice = 1.0 - (2.0 * inter + eps) / (jnp.sum(p, axis=-1) + jnp.sum(t, axis=-1) + eps)  # (b, N)
+        present = (jnp.sum(t, axis=-1) > 0).astype(jnp.float32)  # (b, N)
+
+        per_obj = focal + dice * present  # (b, N)
+        return jnp.mean(per_obj, axis=-1)  # (b,)
