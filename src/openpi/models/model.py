@@ -386,30 +386,30 @@ class RiclObservation(Generic[ArrayT]):
     # Per-patch target mask of the query top camera (`base_0_rgb`), soft fraction in [0, 1].
     # Union reasoning config: (*b, p). Per-object config: (*b, n, p) with one channel per obj_id
     # (the leading object axis is absorbed by the variadic `*b`, so the annotation covers both).
-    query_seg_target: at.Float[ArrayT, "*b p"] | None = None
+    query_seg_target: at.Float[ArrayT, "*bo p"] | None = None
     # Per-patch flag (soft fraction in [0, 1]) of each retrieved slot's top camera object mask.
     # (*b, p) for the union config, (*b, n, p) per-object. Adds a learnable flag embedding to
     # flagged retrieved patches.
-    retrieved_0_flag_mask: at.Float[ArrayT, "*b p"] | None = None
-    retrieved_1_flag_mask: at.Float[ArrayT, "*b p"] | None = None
-    retrieved_2_flag_mask: at.Float[ArrayT, "*b p"] | None = None
-    retrieved_3_flag_mask: at.Float[ArrayT, "*b p"] | None = None
-    retrieved_4_flag_mask: at.Float[ArrayT, "*b p"] | None = None
-    retrieved_5_flag_mask: at.Float[ArrayT, "*b p"] | None = None
-    retrieved_6_flag_mask: at.Float[ArrayT, "*b p"] | None = None
-    retrieved_7_flag_mask: at.Float[ArrayT, "*b p"] | None = None
-    retrieved_8_flag_mask: at.Float[ArrayT, "*b p"] | None = None
-    retrieved_9_flag_mask: at.Float[ArrayT, "*b p"] | None = None
-    retrieved_10_flag_mask: at.Float[ArrayT, "*b p"] | None = None
-    retrieved_11_flag_mask: at.Float[ArrayT, "*b p"] | None = None
-    retrieved_12_flag_mask: at.Float[ArrayT, "*b p"] | None = None
-    retrieved_13_flag_mask: at.Float[ArrayT, "*b p"] | None = None
-    retrieved_14_flag_mask: at.Float[ArrayT, "*b p"] | None = None
-    retrieved_15_flag_mask: at.Float[ArrayT, "*b p"] | None = None
-    retrieved_16_flag_mask: at.Float[ArrayT, "*b p"] | None = None
-    retrieved_17_flag_mask: at.Float[ArrayT, "*b p"] | None = None
-    retrieved_18_flag_mask: at.Float[ArrayT, "*b p"] | None = None
-    retrieved_19_flag_mask: at.Float[ArrayT, "*b p"] | None = None
+    retrieved_0_flag_mask: at.Float[ArrayT, "*bo p"] | None = None
+    retrieved_1_flag_mask: at.Float[ArrayT, "*bo p"] | None = None
+    retrieved_2_flag_mask: at.Float[ArrayT, "*bo p"] | None = None
+    retrieved_3_flag_mask: at.Float[ArrayT, "*bo p"] | None = None
+    retrieved_4_flag_mask: at.Float[ArrayT, "*bo p"] | None = None
+    retrieved_5_flag_mask: at.Float[ArrayT, "*bo p"] | None = None
+    retrieved_6_flag_mask: at.Float[ArrayT, "*bo p"] | None = None
+    retrieved_7_flag_mask: at.Float[ArrayT, "*bo p"] | None = None
+    retrieved_8_flag_mask: at.Float[ArrayT, "*bo p"] | None = None
+    retrieved_9_flag_mask: at.Float[ArrayT, "*bo p"] | None = None
+    retrieved_10_flag_mask: at.Float[ArrayT, "*bo p"] | None = None
+    retrieved_11_flag_mask: at.Float[ArrayT, "*bo p"] | None = None
+    retrieved_12_flag_mask: at.Float[ArrayT, "*bo p"] | None = None
+    retrieved_13_flag_mask: at.Float[ArrayT, "*bo p"] | None = None
+    retrieved_14_flag_mask: at.Float[ArrayT, "*bo p"] | None = None
+    retrieved_15_flag_mask: at.Float[ArrayT, "*bo p"] | None = None
+    retrieved_16_flag_mask: at.Float[ArrayT, "*bo p"] | None = None
+    retrieved_17_flag_mask: at.Float[ArrayT, "*bo p"] | None = None
+    retrieved_18_flag_mask: at.Float[ArrayT, "*bo p"] | None = None
+    retrieved_19_flag_mask: at.Float[ArrayT, "*bo p"] | None = None
 
     @classmethod
     def from_dict(cls, data: at.PyTree[ArrayT], num_retrieved_observations: int) -> "RiclObservation[ArrayT]":

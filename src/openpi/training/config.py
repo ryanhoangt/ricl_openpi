@@ -844,6 +844,7 @@ _CONFIGS = [
         ),
         num_train_steps=10_000,
         batch_size=8,
+        
         freeze_filter=pi0_fast_reasoning_ricl.Pi0FASTReasoningRiclConfig(
             action_dim=7,
             action_horizon=10,
