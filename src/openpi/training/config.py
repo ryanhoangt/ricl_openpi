@@ -883,7 +883,7 @@ _CONFIGS = [
             lambda_scene=1.0,
             use_seg_flag=True,
             query_patch_dropout=0.0,
-            num_seg_objects=5,
+            num_seg_objects=8,
         ),
         data=RiclReasoningLiberoDataConfig(
             repo_id=None,
@@ -905,7 +905,7 @@ _CONFIGS = [
             lamda=10.0,
             num_reasoning_tokens=16,
             lambda_scene=1.0,
-            num_seg_objects=5,
+            num_seg_objects=8,
         ).get_freeze_filter_with_frozen_img_encoder(),
         ema_decay=None,
         log_interval=1,
