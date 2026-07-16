@@ -7,4 +7,4 @@
 [submodule "third_party/vip"]
 	path = third_party/vip
 	url = https://github.com/ryanhoangt/vip.git
-	branch = repro-3.12
+	branch = repro-3.11
