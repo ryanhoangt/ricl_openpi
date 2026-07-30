@@ -35,8 +35,9 @@ class Checkpoint:
     # Optional override for the k-step-offset retrieval slot scheme. -1 = use the value baked
     # into the model config (frozen with the checkpoint); >=0 = override at inference for ablation.
     ricl_step_offset: int = -1
-    # If True (reasoning-RICL only), return a per-step debug panel (retrieved ctx + masks + predicted
-    # query mask) in the infer response so the client can write a `<rollout>_w_seg_masks.mp4` video.
+    # If True, return per-step debug panels in the infer response so the client can write debug videos
+    # alongside the rollout: a retrieved-context panel (any RICL config) -> `<rollout>_w_ctx.mp4`, plus
+    # a seg panel (masks + predicted query mask, reasoning-RICL only) -> `<rollout>_w_seg_masks.mp4`.
     record_debug: bool = False
 
 

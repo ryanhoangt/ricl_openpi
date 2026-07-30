@@ -22,7 +22,7 @@ from autofaiss import build_index
 import logging
 from datetime import datetime
 import json
-from PIL import Image
+from PIL import Image, ImageDraw
 logger = logging.getLogger()
 BasePolicy: TypeAlias = _base_policy.BasePolicy
 
@@ -88,6 +88,33 @@ def get_action_chunk_at_inference_time(actions, step_idx, action_horizon):
     return action_chunk
 
 
+def _label_img(arr, text):
+    """Draw a small yellow caption in the top-left corner of an (H,W,3) uint8 image."""
+    im = Image.fromarray(np.ascontiguousarray(arr))
+    ImageDraw.Draw(im).text((3, 3), text, fill=(255, 255, 0))
+    return np.asarray(im)
+
+
+def _slot_label(i, sims, slots):
+    """`NN{i} sim=<exp(-lambda*d)> e<ep>/<step>`, dropping the parts we don't have."""
+    txt = f"NN{i} sim={sims[i]:.2f}" if i < len(sims) else f"NN{i}"
+    if slots is not None and i < len(slots):
+        txt += f" e{int(slots[i][0])}/{int(slots[i][1])}"
+    return txt
+
+
+def _hstack_rows(rows):
+    """Stack rows of differing widths vertically, right-padding the narrow ones with black."""
+    width = max(r.shape[1] for r in rows)
+    rows = [
+        r
+        if r.shape[1] == width
+        else np.concatenate([r, np.zeros((r.shape[0], width - r.shape[1], 3), np.uint8)], axis=1)
+        for r in rows
+    ]
+    return np.concatenate(rows, axis=0)
+
+
 def _build_seg_debug_panel(query_img_u8, nn_imgs_u8, nn_masks, pred_grid, sims, slots=None):
     """Debug panel: row of [NN_i top img + SAM mask (yellow), labeled] over [query | query+pred (red)].
 
@@ -95,8 +122,6 @@ def _build_seg_debug_panel(query_img_u8, nn_imgs_u8, nn_masks, pred_grid, sims, 
     [0,1]; sims: per-observation exp(-lambda*dist) closeness; slots: optional (k,2) (ep,step) labels.
     Returns a single (2H, k*W, 3) uint8 image.
     """
-    from PIL import Image, ImageDraw
-
     query_img_u8 = np.asarray(query_img_u8)
     h, w = query_img_u8.shape[:2]
 
@@ -107,28 +132,38 @@ def _build_seg_debug_panel(query_img_u8, nn_imgs_u8, nn_masks, pred_grid, sims, 
         out = rgb_u8.astype(np.float32) * (1 - alpha * m[..., None]) + np.asarray(color, np.float32) * (alpha * m[..., None])
         return out.clip(0, 255).astype(np.uint8)
 
-    def label(arr, text):
-        im = Image.fromarray(np.ascontiguousarray(arr))
-        ImageDraw.Draw(im).text((3, 3), text, fill=(255, 255, 0))
-        return np.asarray(im)
-
     nn_panels = []
     for i in range(len(nn_imgs_u8)):
         msk = np.zeros((h, w), np.float32) if nn_masks[i] is None else nn_masks[i]
-        txt = f"NN{i} sim={sims[i]:.2f}" if i < len(sims) else f"NN{i}"
-        if slots is not None and i < len(slots):
-            txt += f" e{int(slots[i][0])}/{int(slots[i][1])}"
-        nn_panels.append(label(overlay(np.asarray(nn_imgs_u8[i]), msk, (255, 255, 0)), txt))
+        nn_panels.append(_label_img(overlay(np.asarray(nn_imgs_u8[i]), msk, (255, 255, 0)), _slot_label(i, sims, slots)))
     top = np.concatenate(nn_panels, axis=1)
 
     bottom = np.concatenate(
-        [label(query_img_u8, "query"), label(overlay(query_img_u8, pred_grid, (255, 0, 0)), "query+pred")], axis=1
+        [_label_img(query_img_u8, "query"), _label_img(overlay(query_img_u8, pred_grid, (255, 0, 0)), "query+pred")],
+        axis=1,
     )
-    if bottom.shape[1] < top.shape[1]:
-        bottom = np.concatenate([bottom, np.zeros((h, top.shape[1] - bottom.shape[1], 3), np.uint8)], axis=1)
-    elif top.shape[1] < bottom.shape[1]:
-        top = np.concatenate([top, np.zeros((h, bottom.shape[1] - top.shape[1], 3), np.uint8)], axis=1)
-    return np.concatenate([top, bottom], axis=0)
+    return _hstack_rows([top, bottom])
+
+
+def _build_ctx_panel(query_top_u8, query_wrist_u8, nn_top_u8, nn_wrist_u8, sims, slots=None):
+    """Retrieved-context panel: [NN_i top] row over [NN_i wrist] row over [query top | query wrist].
+
+    Model-agnostic (no SAM masks, no predicted mask), so it works for every RICL config -- not just
+    reasoning-RICL. Returns a single (3H, k*W, 3) uint8 image.
+    """
+    rows = [
+        np.concatenate(
+            [_label_img(np.asarray(nn_top_u8[i]), _slot_label(i, sims, slots)) for i in range(len(nn_top_u8))], axis=1
+        ),
+        np.concatenate(
+            [_label_img(np.asarray(nn_wrist_u8[i]), f"NN{i} wrist") for i in range(len(nn_wrist_u8))], axis=1
+        ),
+        np.concatenate(
+            [_label_img(np.asarray(query_top_u8), "query"), _label_img(np.asarray(query_wrist_u8), "query wrist")],
+            axis=1,
+        ),
+    ]
+    return _hstack_rows(rows)
 
 
 class RiclPolicy(BasePolicy):
@@ -150,7 +185,8 @@ class RiclPolicy(BasePolicy):
         record_debug: bool = False,
     ):
         self._sample_actions = nnx_utils.module_jit(model.sample_actions)
-        # Reasoning-RICL only: predict the query seg mask from the reasoning tokens for the debug video.
+        # When set, every infer() also returns a retrieved-context panel; reasoning-RICL additionally
+        # gets a seg panel with the query mask predicted from its reasoning tokens.
         self._record_debug = bool(record_debug)
         self._predict_seg_mask = (
             nnx_utils.module_jit(model.predict_seg_mask) if hasattr(model, "predict_seg_mask") else None
@@ -381,25 +417,45 @@ class RiclPolicy(BasePolicy):
             "query_actions": self._sample_actions(sample_rng, ricl_obs, **self._sample_kwargs),
         }
 
-        # Optional debug panel: retrieved ctx (+ SAM masks) and the reasoning-token predicted query mask.
+        # Optional debug panels (`record_debug`):
+        #   - ctx panel: retrieved context only, so it works for every RICL config.
+        #   - seg panel: reasoning-RICL only (needs `predict_seg_mask` + the offline retrieved masks).
+        ctx_panel = None
         debug_panel = None
-        if self._record_debug and self._predict_seg_mask is not None:
-            seg_pred = np.asarray(self._predict_seg_mask(ricl_obs))[0]  # (P,)
-            gs = int(round(seg_pred.shape[0] ** 0.5))
-            debug_panel = _build_seg_debug_panel(
-                obs["query_top_image"],
-                [obs[f"retrieved_{i}_top_image"] for i in range(self._knn_k)],
-                [obs.get(f"retrieved_{i}_seg_mask") for i in range(self._knn_k)],
-                seg_pred.reshape(gs, gs),
-                np.asarray(obs["exp_lamda_distances"]).reshape(-1),
-                obs.get("_debug_slots"),
+        if self._record_debug:
+            sims = (
+                np.asarray(obs["exp_lamda_distances"]).reshape(-1)
+                if "exp_lamda_distances" in obs
+                else np.zeros(0, dtype=np.float32)
             )
+            slots = obs.get("_debug_slots")
+            ctx_panel = _build_ctx_panel(
+                obs["query_top_image"],
+                obs["query_wrist_image"],
+                [obs[f"retrieved_{i}_top_image"] for i in range(self._knn_k)],
+                [obs[f"retrieved_{i}_wrist_image"] for i in range(self._knn_k)],
+                sims,
+                slots,
+            )
+            if self._predict_seg_mask is not None:
+                seg_pred = np.asarray(self._predict_seg_mask(ricl_obs))[0]  # (P,)
+                gs = int(round(seg_pred.shape[0] ** 0.5))
+                debug_panel = _build_seg_debug_panel(
+                    obs["query_top_image"],
+                    [obs[f"retrieved_{i}_top_image"] for i in range(self._knn_k)],
+                    [obs.get(f"retrieved_{i}_seg_mask") for i in range(self._knn_k)],
+                    seg_pred.reshape(gs, gs),
+                    sims,
+                    slots,
+                )
 
         # Unbatch and convert to np.ndarray.
         logger.info(f'unbatching...')
         outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
         final_outputs = self._output_transform(outputs)
         print(f'final_outputs: {final_outputs}')
+        if ctx_panel is not None:
+            final_outputs["ctx_panel"] = ctx_panel
         if debug_panel is not None:
             final_outputs["debug_panel"] = debug_panel
         return final_outputs

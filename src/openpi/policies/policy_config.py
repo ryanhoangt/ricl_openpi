@@ -104,6 +104,9 @@ def create_trained_ricl_policy(
         max_distance_file: Path to the max_distance.json file for distance normalization.
         ricl_step_offset_override: If >= 0, override the k-step-offset retrieval scheme value
             from the model config at inference time (for ablation). -1 = use the config value.
+        record_debug: If True, each infer() response also carries per-step debug panels for the
+            client to turn into videos: `ctx_panel` (retrieved context, any RICL config) and, for
+            reasoning-RICL only, `debug_panel` (SAM masks + predicted query mask).
     """
     logging.info("Loading model...")
     model = train_config.model.load(_model.restore_params(f"{checkpoint_dir}/params", dtype=jnp.bfloat16))
